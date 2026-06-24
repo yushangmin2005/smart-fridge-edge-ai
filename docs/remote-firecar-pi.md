@@ -13,10 +13,13 @@
 - Docker/Podman：无
 - Python：3.8.10
 - sudo：存在，但无免密 sudo
+- OpenSSL：系统版本为 1.1.1f，无 `libssl.so.3/libcrypto.so.3`
 
 ## 结论
 
 该设备不能承载 vLLM/SGLang 这类 GPU 推理后端。当前采用 `llama.cpp` Ubuntu ARM64 CPU 用户态运行时，优先使用预编译包；如遇 Ubuntu 20.04 系统库不兼容，则回退到同版本源码编译。模型后续通过 `~/vlm-inference/config/vlm.env` 切换。
+
+由于 Ubuntu 20.04 默认没有 `libssl.so.3`，且该设备无免密 sudo，不从 Ubuntu 22.04 混装系统包。项目通过 `scripts/deploy_openssl3_user.sh` 在 `~/vlm-inference/runtime/openssl-current` 下提供 OpenSSL 3 用户态共享库。
 
 ## 推荐模型策略
 

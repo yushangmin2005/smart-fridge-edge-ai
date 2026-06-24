@@ -125,6 +125,8 @@ cat > "$VLM_REMOTE_DIR/bin/start_vlm.sh" <<'EOF'
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OPENSSL_ENV="$ROOT/bin/openssl3_env.sh"
+[ -f "$OPENSSL_ENV" ] && . "$OPENSSL_ENV"
 ENV_FILE="${VLM_ENV_FILE:-$ROOT/config/vlm.env}"
 if [ -f "$ENV_FILE" ]; then
   set -a
@@ -265,6 +267,8 @@ cat > "$VLM_REMOTE_DIR/bin/runtime_check.sh" <<'EOF'
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OPENSSL_ENV="$ROOT/bin/openssl3_env.sh"
+[ -f "$OPENSSL_ENV" ] && . "$OPENSSL_ENV"
 LLAMA_DIR="${LLAMA_DIR:-$ROOT/runtime/current}"
 export LD_LIBRARY_PATH="$LLAMA_DIR:${LD_LIBRARY_PATH:-}"
 
