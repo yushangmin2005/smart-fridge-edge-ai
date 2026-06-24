@@ -1,0 +1,12 @@
+*.log
+*.pid
+.DS_Store
+
+# Local secrets and model assets
+config/*.env
+!config/*.env.example
+models/
+logs/
+run/
+runtime/
+tmp/
