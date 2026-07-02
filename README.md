@@ -12,6 +12,7 @@
 - YOLO 运行时：`onnxruntime==1.16.3`、`numpy==1.24.4`、`Pillow==10.4.0`，安装到远程 `~/yolo-inference/runtime/python-packages`
 - YOLO 模型格式：ONNX；训练/微调可在其他机器完成，板端只负责加载导出的 `.onnx` 文件
 - YOLO 训练栈：本地 macOS 使用 `uv` 创建 Python 3.12 虚拟环境，安装 `ultralytics`、`roboflow`、`torch`、`onnx`、`onnxruntime`、`onnxslim`
+- YOLO 导出格式：默认 ONNX opset 19，兼容远程 `onnxruntime==1.16.3`
 - 公开训练数据：默认使用 Roboflow Universe `fridge-dataset/fridge-food-images/14`，手动导出的 YOLO11/YOLOv8 数据集也可放入 `data/fridge-food-images/`
 - 脚本语言：Bash
 
@@ -156,7 +157,16 @@ cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env
 scripts/run_public_yolo_training.sh
 ```
 
-默认训练 `yolo11n.pt`，`imgsz=640`，`epochs=80`，`batch=8`，`device=auto`。脚本会优先使用 Apple MPS，若不可用则回退 CPU。
+默认训练 `yolo11n.pt`，`imgsz=640`，`epochs=80`，`batch=8`，`device=auto`。脚本会优先使用 Apple MPS，若不可用则回退 CPU。ONNX 导出默认使用 `YOLO_ONNX_OPSET=19`，以兼容板端 `onnxruntime==1.16.3`。
+
+本次公开数据集基线结果：
+
+- 数据集：Roboflow `fridge-dataset/fridge-food-images/14`
+- 数据规模：train 4172 张、valid 470 张、test 497 张，30 个食材类别
+- 训练模型：`yolo11n.pt`，`imgsz=640`，`batch=8`，Apple MPS
+- 最佳轮次：第 10 轮，`mAP50=0.80546`，`mAP50-95=0.55512`
+- 本地导出：`models/fridge-yolo11n.onnx` 与 `models/fridge-yolo11n.classes.txt`
+- 远端部署：`firecar-pi:/home/pi/yolo-inference/models/fridge-yolo11n.onnx`
 
 如果暂时没有 Roboflow API key，可先用 GitHub 5K Groceries 数据集验证训练链路：
 
@@ -216,3 +226,10 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 新增本地 YOLO11n 训练环境安装、Roboflow 数据集下载、GitHub 5K Groceries 数据集转换、训练、ONNX 导出和远程模型同步脚本。
   - 新增公开数据集训练文档，明确 YOLO 只做冰箱食材入口识别，风险判断后续交给 VLM/规则层。
   - `.gitignore` 增补本地数据集、训练输出、虚拟环境与权重文件忽略规则。
+
+- `codex-vlm-inference-framework.0.3.1.202607021335`
+  - 使用 Roboflow `fridge-dataset/fridge-food-images/14` 完成本地 YOLO11n 公开数据集基线训练，最佳第 10 轮 `mAP50=0.80546`、`mAP50-95=0.55512`。
+  - ONNX 导出默认固定 `YOLO_ONNX_OPSET=19`，兼容远程 `onnxruntime==1.16.3`。
+  - 修复 `scripts/lib_config.sh` 在 macOS Bash 3.2 空 override 数组下触发 `set -u` 的问题。
+  - 修复 YOLO 模型远端同步脚本的本地/远端路径解析，避免 `YOLO_REMOTE_DIR=~/...` 被本机展开为 `/Users/...`。
+  - 完成本地 ONNX 推理、`firecar-pi` 远端模型加载检查和远端实际图片检测验证。

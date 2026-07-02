@@ -18,7 +18,9 @@ load_config_with_overrides() {
   set +a
 
   local assignment
-  for assignment in "${overrides[@]}"; do
-    export "$assignment"
-  done
+  if [ "${#overrides[@]}" -gt 0 ]; then
+    for assignment in "${overrides[@]}"; do
+      export "$assignment"
+    done
+  fi
 }

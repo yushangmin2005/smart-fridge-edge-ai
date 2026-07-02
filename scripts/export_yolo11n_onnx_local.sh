@@ -17,7 +17,8 @@ if [ -f "$CONFIG_FILE" ]; then
     YOLO_RUN_NAME \
     YOLO_EXPORT_MODEL \
     YOLO_EXPORT_LABELS \
-    YOLO_IMG_SIZE
+    YOLO_IMG_SIZE \
+    YOLO_ONNX_OPSET
 else
   echo "Missing config: $CONFIG_FILE" >&2
   echo "Create it with: cp $EXAMPLE_CONFIG $CONFIG_FILE" >&2
@@ -54,6 +55,7 @@ mkdir -p "$(dirname "$EXPORT_MODEL")" "$(dirname "$EXPORT_LABELS")"
   "model=$WEIGHTS" \
   format=onnx \
   "imgsz=${YOLO_IMG_SIZE:-640}" \
+  "opset=${YOLO_ONNX_OPSET:-19}" \
   simplify=True \
   dynamic=False \
   nms=False

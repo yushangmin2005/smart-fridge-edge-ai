@@ -22,10 +22,26 @@ else
 fi
 
 HOST="${1:-${YOLO_REMOTE_HOST:-firecar-pi}}"
-REMOTE_DIR="${YOLO_REMOTE_DIR:-~/yolo-inference}"
+REMOTE_DIR_RAW="${YOLO_REMOTE_DIR:-~/yolo-inference}"
 REMOTE_MODEL_NAME="${YOLO_REMOTE_MODEL_NAME:-fridge-yolo11n.onnx}"
-LOCAL_ONNX="$REPO_ROOT/${YOLO_EXPORT_MODEL:-models/fridge-yolo11n.onnx}"
-LOCAL_LABELS="$REPO_ROOT/${YOLO_EXPORT_LABELS:-models/fridge-yolo11n.classes.txt}"
+LOCAL_ONNX_VALUE="${YOLO_EXPORT_MODEL:-models/fridge-yolo11n.onnx}"
+LOCAL_LABELS_VALUE="${YOLO_EXPORT_LABELS:-models/fridge-yolo11n.classes.txt}"
+
+if [ "$REMOTE_DIR_RAW" = "$HOME" ]; then
+  REMOTE_DIR_RAW="~"
+elif [ "${REMOTE_DIR_RAW#"$HOME"/}" != "$REMOTE_DIR_RAW" ]; then
+  REMOTE_DIR_RAW="~/${REMOTE_DIR_RAW#"$HOME"/}"
+fi
+
+resolve_local_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$REPO_ROOT" "$1" ;;
+  esac
+}
+
+LOCAL_ONNX="$(resolve_local_path "$LOCAL_ONNX_VALUE")"
+LOCAL_LABELS="$(resolve_local_path "$LOCAL_LABELS_VALUE")"
 
 if [ ! -f "$LOCAL_ONNX" ]; then
   echo "Missing local ONNX model: $LOCAL_ONNX" >&2
@@ -39,7 +55,26 @@ if [ ! -f "$LOCAL_LABELS" ]; then
   exit 4
 fi
 
-ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST" "mkdir -p $REMOTE_DIR/models $REMOTE_DIR/config"
+REMOTE_DIR="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST" \
+  "REMOTE_DIR_RAW='$REMOTE_DIR_RAW' bash -s" <<'REMOTE'
+set -euo pipefail
+
+raw="${REMOTE_DIR_RAW:-~/yolo-inference}"
+if [ "$raw" = "~" ]; then
+  remote_dir="$HOME"
+elif [ "${raw#\~/}" != "$raw" ]; then
+  remote_dir="$HOME/${raw#\~/}"
+elif [ "${raw#/}" != "$raw" ]; then
+  remote_dir="$raw"
+else
+  remote_dir="$HOME/$raw"
+fi
+
+mkdir -p "$remote_dir/models" "$remote_dir/config"
+printf '%s\n' "$remote_dir"
+REMOTE
+)"
+
 scp -q "$LOCAL_ONNX" "$HOST:$REMOTE_DIR/models/$REMOTE_MODEL_NAME"
 scp -q "$LOCAL_LABELS" "$HOST:$REMOTE_DIR/config/classes.txt"
 
