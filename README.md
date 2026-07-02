@@ -214,10 +214,10 @@ VLM_MODEL_PATH=/home/pi/vlm-inference/models/smart-fridge-qwen25vl/smart-fridge-
 VLM_MMPROJ_PATH=/home/pi/vlm-inference/models/smart-fridge-qwen25vl/mmproj-smart-fridge-qwen25vl-Q8_0.gguf
 VLM_CTX_SIZE=2048
 VLM_TIMEOUT=3600
-VLM_EXTRA_ARGS="--image-min-tokens 256 --image-max-tokens 768 --jinja"
+VLM_EXTRA_ARGS="--image-min-tokens 64 --image-max-tokens 64 --jinja"
 ```
 
-该模型包来自本机 `/Users/yushangmin/Desktop/smart_fridge_qwen25vl_gguf/`。远端磁盘在部署后剩余约 1.3 GiB；当前参数优先保证 NanoPC-T4 CPU-only 环境可启动。`VLM_TIMEOUT=3600` 将 `llama-server` 读写超时显式固定为 1 小时；发起图片推理的客户端也需要设置不低于 1 小时的 HTTP 超时。`llama.cpp` 对 Qwen-VL grounding 任务提示 `image-min-tokens=1024` 更适合精细定位，但会进一步增加内存占用与推理时间。
+该模型包来自本机 `/Users/yushangmin/Desktop/smart_fridge_qwen25vl_gguf/`。远端磁盘在部署后剩余约 1.3 GiB；当前参数优先保证 NanoPC-T4 CPU-only 环境可启动。`VLM_TIMEOUT=3600` 将 `llama-server` 读写超时显式固定为 1 小时；发起图片推理的客户端也需要设置不低于 1 小时的 HTTP 超时。由于 YOLO 已经负责定位并裁剪新增区域，VLM 默认使用 `image-min-tokens=64`、`image-max-tokens=64` 做裁剪图语义识别；`llama.cpp` 对 Qwen-VL grounding 任务提示 `image-min-tokens=1024` 更适合精细定位，但会进一步增加内存占用与推理时间。
 
 启动、停止与状态检查：
 
@@ -388,3 +388,10 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 新增 `vlm_food_prompt.txt`，要求 llama/VLM 输出食物名称、种类、组成、新鲜度、建议和置信度等固定 JSON 字段。
   - 远程部署脚本新增 `fridge_pipeline.sh`、`start_pipeline.sh`、`stop_pipeline.sh`、`status_pipeline.sh`，默认每 1 小时运行一次并保留最近 24 张拍照图。
   - 远程验证真实摄像头拍照、真实 YOLO 检测、mock VLM 写库、同图 unchanged 和消失 removed 差分路径。
+
+- `codex-vlm-inference-framework.0.7.1.202607030113`
+  - 压缩 VLM JSON prompt，减少 CPU-only Qwen2.5-VL 单次裁剪分析的输入 token。
+  - 将当前智能冰箱 VLM 裁剪图识别参数调整为 `image-min-tokens=64`、`image-max-tokens=64`，由 YOLO 承担定位，VLM 专注语义与状态分析。
+  - 管线现在会保存 VLM 原始 HTTP 响应、模型文本和规范化 JSON，便于定位真实模型未写库时是解析失败、非食物判断还是推理超时。
+  - 增加 `SMART_FRIDGE_YOLO_MOCK_JSON` 测试钩子，用于单框验证真实 VLM 到 SQLite 的闭环，不影响正式 YOLO 调用。
+  - 远端单框真实 VLM 闭环验证通过：`milk` 裁剪图由 Qwen2.5-VL 输出 `food_name=牛奶`、`category=dairy`、`freshness=attention`、`confidence=0.9`，并写入临时 SQLite 的 `foods`、`food_observations`、`food_events`。

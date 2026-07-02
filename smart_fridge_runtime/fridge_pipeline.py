@@ -69,6 +69,12 @@ def write_json(path, payload):
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_text(path, text):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(str(text), encoding="utf-8")
+
+
 def run_command(command, timeout=None, capture_output=True):
     result = subprocess.run(
         command,
@@ -254,6 +260,17 @@ def match_detections(previous_objects, detections, threshold):
 
 
 def run_yolo(image_path, output_json_path):
+    mock_yolo = env("SMART_FRIDGE_YOLO_MOCK_JSON")
+    if mock_yolo:
+        if mock_yolo.strip().startswith("{"):
+            payload = json.loads(mock_yolo)
+        else:
+            payload = read_json(mock_yolo, {})
+        payload = dict(payload or {})
+        payload.setdefault("image", image_path)
+        write_json(output_json_path, payload)
+        return payload, payload.get("detections") or []
+
     yolo_bin = shlex.split(env("SMART_FRIDGE_YOLO_BIN", "/home/pi/yolo-inference/bin/yolo_detect.sh"))
     command = yolo_bin + ["--image", image_path, "--output-json", output_json_path]
     run_command(command, timeout=env_int("SMART_FRIDGE_YOLO_TIMEOUT", 300))
@@ -369,6 +386,13 @@ def extract_json_object(text):
     raise ValueError("VLM response JSON object was incomplete")
 
 
+def extract_chat_content(response_payload):
+    message = response_payload["choices"][0]["message"]["content"]
+    if isinstance(message, list):
+        return "\n".join(part.get("text", "") for part in message if isinstance(part, dict))
+    return str(message)
+
+
 def normalize_vlm_result(payload):
     result = dict(payload or {})
     result.setdefault("is_food", True)
@@ -403,9 +427,13 @@ def load_mock_vlm_result(mock_value):
     raise RuntimeError("SMART_FRIDGE_VLM_MOCK_JSON does not point to a JSON object or file")
 
 
-def call_vlm(crop_path, yolo_detection):
+def call_vlm(crop_path, yolo_detection, raw_response_path=None, raw_text_path=None):
     mock = load_mock_vlm_result(env("SMART_FRIDGE_VLM_MOCK_JSON"))
     if mock is not None:
+        if raw_response_path:
+            write_json(raw_response_path, {"mock": True, "result": mock})
+        if raw_text_path:
+            write_text(raw_text_path, json.dumps(mock, ensure_ascii=False, separators=(",", ":")))
         return mock
 
     chat_url = env("SMART_FRIDGE_VLM_URL", "http://127.0.0.1:8080/v1/chat/completions")
@@ -437,7 +465,10 @@ def call_vlm(crop_path, yolo_detection):
         "temperature": 0,
         "max_tokens": env_int("SMART_FRIDGE_VLM_MAX_TOKENS", 512),
     }
-    attempts = [dict(base_payload, response_format={"type": "json_object"}), base_payload]
+    if env_bool("SMART_FRIDGE_VLM_USE_RESPONSE_FORMAT", False):
+        attempts = [dict(base_payload, response_format={"type": "json_object"}), base_payload]
+    else:
+        attempts = [base_payload]
     last_error = None
     for payload in attempts:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -450,9 +481,11 @@ def call_vlm(crop_path, yolo_detection):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_payload = json.loads(response.read().decode("utf-8"))
-            message = response_payload["choices"][0]["message"]["content"]
-            if isinstance(message, list):
-                message = "\n".join(part.get("text", "") for part in message if isinstance(part, dict))
+            message = extract_chat_content(response_payload)
+            if raw_response_path:
+                write_json(raw_response_path, response_payload)
+            if raw_text_path:
+                write_text(raw_text_path, message)
             return normalize_vlm_result(extract_json_object(str(message)))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -620,18 +653,51 @@ def run_once(args):
         detection = detections[detection_index]
         crop_path = paths["crop_dir"] / "{0}_det{1}.jpg".format(timestamp, detection_index)
         vlm_json_path = paths["vlm_dir"] / "{0}_det{1}.json".format(timestamp, detection_index)
+        vlm_response_path = "{0}.response.json".format(vlm_json_path)
+        vlm_raw_text_path = "{0}.raw.txt".format(vlm_json_path)
         crop_path, crop_box = crop_detection(image_path, detection, crop_path)
         try:
-            vlm_result = call_vlm(crop_path, detection)
+            vlm_result = call_vlm(crop_path, detection, vlm_response_path, vlm_raw_text_path)
         except Exception as exc:
             if env_bool("SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR", True):
                 vlm_result = fallback_vlm_result(detection, str(exc))
-                errors.append({"stage": "vlm", "detection_index": detection_index, "error": str(exc), "fallback": True})
+                write_json(vlm_json_path, vlm_result)
+                errors.append(
+                    {
+                        "stage": "vlm",
+                        "detection_index": detection_index,
+                        "error": str(exc),
+                        "fallback": True,
+                        "vlm_json": str(vlm_json_path),
+                        "vlm_response_json": vlm_response_path,
+                        "vlm_raw_text": vlm_raw_text_path,
+                    }
+                )
             else:
-                errors.append({"stage": "vlm", "detection_index": detection_index, "error": str(exc), "fallback": False})
+                errors.append(
+                    {
+                        "stage": "vlm",
+                        "detection_index": detection_index,
+                        "error": str(exc),
+                        "fallback": False,
+                        "vlm_response_json": vlm_response_path,
+                        "vlm_raw_text": vlm_raw_text_path,
+                    }
+                )
                 continue
+        write_json(vlm_json_path, vlm_result)
         if vlm_result.get("is_food") is False:
-            added.append({"detection_index": detection_index, "skipped": True, "reason": "vlm_is_food_false"})
+            added.append(
+                {
+                    "detection_index": detection_index,
+                    "skipped": True,
+                    "reason": "vlm_is_food_false",
+                    "yolo_label": detection.get("class_name"),
+                    "vlm_json": str(vlm_json_path),
+                    "vlm_response_json": vlm_response_path,
+                    "vlm_raw_text": vlm_raw_text_path,
+                }
+            )
             continue
         db_result = ingest_added_detection(
             image_path,
