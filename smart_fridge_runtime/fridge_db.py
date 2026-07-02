@@ -305,13 +305,16 @@ def command_ingest(args):
     with connect(args.db) as conn:
         init_schema(conn)
         with conn:
-            food_row, duplicate_candidate = find_food(
-                conn,
-                args.food_id,
-                values["normalized_name"],
-                values["captured_at"],
-                duplicate_window,
-            )
+            if args.force_new_food:
+                food_row, duplicate_candidate = None, False
+            else:
+                food_row, duplicate_candidate = find_food(
+                    conn,
+                    args.food_id,
+                    values["normalized_name"],
+                    values["captured_at"],
+                    duplicate_window,
+                )
             if food_row and duplicate_candidate:
                 food_id = food_row["food_id"]
                 event_type = "food.updated"
@@ -577,6 +580,7 @@ def parse_args(argv):
     ingest_parser.add_argument("--captured-at")
     ingest_parser.add_argument("--image-ref")
     ingest_parser.add_argument("--food-id")
+    ingest_parser.add_argument("--force-new-food", action="store_true")
     ingest_parser.add_argument("--canonical-name")
     ingest_parser.add_argument("--storage-location")
     ingest_parser.add_argument("--duplicate-window-minutes", type=int, default=default_duplicate_window)

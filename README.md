@@ -16,6 +16,7 @@
 - YOLO 导出格式：默认 ONNX opset 19，兼容远程 `onnxruntime==1.16.3`
 - 公开训练数据：默认使用 Roboflow Universe `fridge-dataset/fridge-food-images/14`，手动导出的 YOLO11/YOLOv8 数据集也可放入 `data/fridge-food-images/`
 - 智能冰箱数据库：SQLite，板端默认路径为 `~/smart-fridge/data/fridge.sqlite3`
+- 智能冰箱调度：`ffmpeg` + v4l2 每 1 小时拍照一次，默认使用 `/dev/video10` UVC 摄像头
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -68,6 +69,11 @@ scripts/deploy_smart_fridge_db.sh firecar-pi
 
 # 检查远程 SQLite schema 与完整性
 scripts/remote_smart_fridge_db_check.sh firecar-pi
+
+# 启动/停止/查看一小时自动识别链路
+ssh firecar-pi '~/smart-fridge/bin/start_pipeline.sh'
+ssh firecar-pi '~/smart-fridge/bin/status_pipeline.sh'
+ssh firecar-pi '~/smart-fridge/bin/stop_pipeline.sh'
 ```
 
 部署后，远程目录结构为：
@@ -104,7 +110,14 @@ YOLO 部署后，远程目录结构为：
   bin/                 # fridge_db/fridge_db_check 脚本
   config/smart_fridge.env
   data/fridge.sqlite3  # SQLite 主库，默认不提交
+  data/pipeline_state.json
+  tmp/captures/        # 定时拍照临时图，最多保留 24 张
+  tmp/crops/           # 新增目标裁剪图
+  tmp/yolo/            # YOLO JSON 输出
+  tmp/vlm/             # VLM 严格 JSON 输出
   runtime/fridge_db.py
+  runtime/fridge_pipeline.py
+  runtime/vlm_food_prompt.txt
 ```
 
 本地 YOLO 训练产物目录为：
@@ -121,6 +134,30 @@ models/               # 导出的 ONNX/classes 文件，默认不提交
 当前智能冰箱采用混合识别架构：YOLO 负责预识别、入库提醒和重复候选标记；`llama.cpp` 承载的 VLM 主识别服务负责输出食物名称、食物状态评估，并将结构化结果写入数据库。最终判断与建议由数据库中同一食物 ID 的历史内容、最新视觉状态、存放时间和规则层共同生成。
 
 详细职责边界见 [docs/smart-fridge-hybrid-pipeline.md](docs/smart-fridge-hybrid-pipeline.md)。
+
+## 自动识别管线
+
+板端自动链路由 `~/smart-fridge/bin/fridge_pipeline.sh` 执行单轮识别，`~/smart-fridge/bin/start_pipeline.sh` 启动后台循环。默认每 3600 秒执行一次：
+
+```text
+摄像头拍照 -> 保留最近 24 张临时图 -> YOLO 检测 -> 与上一轮状态做 IoU 匹配
+  -> unchanged 维持原 food_id，不重复调用 VLM
+  -> added 裁剪新增框，发送给 llama.cpp VLM 输出严格 JSON，再写 SQLite
+  -> removed 写入 food.removed 事件，并从当前 active state 移除
+```
+
+关键配置在远程 `~/smart-fridge/config/smart_fridge.env`：
+
+```bash
+SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS=3600
+SMART_FRIDGE_CAPTURE_KEEP=24
+SMART_FRIDGE_CAMERA_DEVICE=/dev/video10
+SMART_FRIDGE_YOLO_BIN=/home/pi/yolo-inference/bin/yolo_detect.sh
+SMART_FRIDGE_VLM_URL=http://127.0.0.1:8080/v1/chat/completions
+SMART_FRIDGE_VLM_TIMEOUT=3600
+```
+
+VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。
 
 ## 数据库命令
 
@@ -255,7 +292,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 
 - 本地脚本检查：`bash -n scripts/*.sh`
 - 数据库 CLI 语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_db.py`
+- 自动管线语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_pipeline.py`
 - 本地 SQLite 冒烟：使用临时目录执行 `fridge_db.py init/ingest/list-foods/show-food/health`，完成后删除临时库。
+- 本地管线差分冒烟：使用假 YOLO 与 mock VLM 执行三轮 `added -> unchanged -> removed`，并检查 24 张临时图保留。
 - 本地训练配置检查：`cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env && scripts/setup_yolo_training_local.sh`
 - 本地训练冒烟：`YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh`，需先准备公开数据集。
 - 本地导出检查：`scripts/export_yolo11n_onnx_local.sh`，需先完成训练并产生 `best.pt`。
@@ -264,6 +303,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - OpenCL 实验检查：`scripts/deploy_llamacpp_opencl.sh firecar-pi`，默认输出 `opencl_runtime=...` 和 `activated=0`；当前 `llama-server --list-devices` 输出 `unsupported GPU 'Mali-T860'` 与空设备列表，不能切换为默认运行时。
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
 - 远程 SQLite 检查：`scripts/remote_smart_fridge_db_check.sh firecar-pi`
+- 远程管线检查：真实 `/dev/video10` 摄像头已通过 `ffmpeg -f v4l2` 拍出 640x360 JPEG；真实摄像头当前 YOLO 检测为 0；公开数据集样图远程 mock VLM 验证通过 `added=11 -> unchanged=11 -> removed=11`。
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
@@ -342,3 +382,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 新增 `smart_fridge_runtime/fridge_db.py`，用 Python 标准库 `sqlite3` 落地 `foods`、`food_observations`、`food_events` 三类核心表。
   - 新增智能冰箱 SQLite 部署与远程检查脚本，默认数据库路径为 `firecar-pi:~/smart-fridge/data/fridge.sqlite3`。
   - README 增补数据库部署、初始化、写入观察记录、查询库存和测试规范。
+
+- `codex-vlm-inference-framework.0.7.0.202607022254`
+  - 新增 `smart_fridge_runtime/fridge_pipeline.py`，串联定时拍照、YOLO 差分、目标裁剪、VLM 严格 JSON 分析和 SQLite 写入。
+  - 新增 `vlm_food_prompt.txt`，要求 llama/VLM 输出食物名称、种类、组成、新鲜度、建议和置信度等固定 JSON 字段。
+  - 远程部署脚本新增 `fridge_pipeline.sh`、`start_pipeline.sh`、`stop_pipeline.sh`、`status_pipeline.sh`，默认每 1 小时运行一次并保留最近 24 张拍照图。
+  - 远程验证真实摄像头拍照、真实 YOLO 检测、mock VLM 写库、同图 unchanged 和消失 removed 差分路径。
