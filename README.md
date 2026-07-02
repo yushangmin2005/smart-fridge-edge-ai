@@ -11,6 +11,8 @@
 - 部署方式：SSH 用户态安装到远程 `~/vlm-inference`，不依赖 sudo、Docker 或系统级服务
 - YOLO 运行时：`onnxruntime==1.16.3`、`numpy==1.24.4`、`Pillow==10.4.0`，安装到远程 `~/yolo-inference/runtime/python-packages`
 - YOLO 模型格式：ONNX；训练/微调可在其他机器完成，板端只负责加载导出的 `.onnx` 文件
+- YOLO 训练栈：本地 macOS 使用 `uv` 创建 Python 3.12 虚拟环境，安装 `ultralytics`、`roboflow`、`torch`、`onnx`、`onnxruntime`、`onnxslim`
+- 公开训练数据：默认使用 Roboflow Universe `fridge-dataset/fridge-food-images/14`，手动导出的 YOLO11/YOLOv8 数据集也可放入 `data/fridge-food-images/`
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -33,6 +35,27 @@ scripts/deploy_yolo_onnx_cpu.sh firecar-pi
 
 # 检查远程 YOLO Python 依赖与 runner
 scripts/remote_yolo_check.sh firecar-pi
+
+# 本地配置公开数据集训练参数
+cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env
+
+# 创建本地 YOLO11n 训练环境
+scripts/setup_yolo_training_local.sh
+
+# 下载 Roboflow 公开数据集；需要 ROBOFLOW_API_KEY 或已登录的 Roboflow CLI
+scripts/download_roboflow_dataset.sh
+
+# 无 Roboflow key 时，用 GitHub 5K Groceries 数据集跑通训练链路
+scripts/download_groceries5k_dataset.sh
+
+# 使用公开数据集训练 YOLO11n
+scripts/train_yolo11n_local.sh
+
+# 导出板端可用的 ONNX 与 classes.txt
+scripts/export_yolo11n_onnx_local.sh
+
+# 将导出的 YOLO 模型同步到 firecar-pi
+scripts/deploy_yolo_model_to_remote.sh firecar-pi
 ```
 
 部署后，远程目录结构为：
@@ -60,6 +83,15 @@ YOLO 部署后，远程目录结构为：
   outputs/             # JSON/标注图输出
   runtime/python-packages
   runtime/yolo_detect.py
+```
+
+本地 YOLO 训练产物目录为：
+
+```text
+data/                 # 公开数据集，默认不提交
+runs/                 # Ultralytics 训练输出，默认不提交
+models/               # 导出的 ONNX/classes 文件，默认不提交
+.venv-yolo/           # 本地训练虚拟环境，默认不提交
 ```
 
 ## 模型配置
@@ -112,9 +144,39 @@ YOLO_IOU=0.45
 ssh firecar-pi '~/yolo-inference/bin/yolo_detect.sh --image ~/yolo-inference/samples/test.jpg --output-json ~/yolo-inference/outputs/test.json --output-image ~/yolo-inference/outputs/test.jpg'
 ```
 
+## 公开数据集训练
+
+默认训练入口见 [docs/yolo-public-dataset-training.md](docs/yolo-public-dataset-training.md)。
+
+最小流程：
+
+```bash
+cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env
+# 在 config/yolo_public_dataset.env 中填入 ROBOFLOW_API_KEY，或手动导出数据集到 data/fridge-food-images/
+scripts/run_public_yolo_training.sh
+```
+
+默认训练 `yolo11n.pt`，`imgsz=640`，`epochs=80`，`batch=8`，`device=auto`。脚本会优先使用 Apple MPS，若不可用则回退 CPU。
+
+如果暂时没有 Roboflow API key，可先用 GitHub 5K Groceries 数据集验证训练链路：
+
+```bash
+scripts/download_groceries5k_dataset.sh
+YOLO_DATA_YAML=data/groceries-5k-yolo/data.yaml YOLO_RUN_NAME=groceries-5k-public scripts/train_yolo11n_local.sh
+```
+
+如果只做冒烟训练：
+
+```bash
+YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
+```
+
 ## 测试规范
 
 - 本地脚本检查：`bash -n scripts/*.sh`
+- 本地训练配置检查：`cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env && scripts/setup_yolo_training_local.sh`
+- 本地训练冒烟：`YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh`，需先准备公开数据集。
+- 本地导出检查：`scripts/export_yolo11n_onnx_local.sh`，需先完成训练并产生 `best.pt`。
 - 远程硬件检查：`scripts/remote_probe.sh firecar-pi`
 - 远程运行时检查：`scripts/remote_runtime_check.sh firecar-pi`
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
@@ -128,7 +190,7 @@ ssh firecar-pi '~/yolo-inference/bin/yolo_detect.sh --image ~/yolo-inference/sam
 - 不从 Ubuntu 22.04 强行混装 `libssl3` 到 Ubuntu 20.04；如需 `libssl.so.3`，使用项目用户态 OpenSSL 3。
 - 不默认下载大模型。NanoPC-T4 根分区只有约 4.2 GiB 可用空间，模型需按需放入 `~/vlm-inference/models`。
 - 不默认在 `firecar-pi` 上安装 PyTorch/Ultralytics 完整训练栈；板端 YOLO 默认只跑 ONNX Runtime CPU 推理。
-- 不提交 `config/*.env`、模型文件、日志、PID 文件或私钥。
+- 不提交 `config/*.env`、公开数据集、训练输出、模型文件、日志、PID 文件或私钥。
 - 不删除远程用户目录中与本项目无关的文件。
 
 ## 修改历史
@@ -148,3 +210,9 @@ ssh firecar-pi '~/yolo-inference/bin/yolo_detect.sh --image ~/yolo-inference/sam
   - 新增轻量 `yolo_detect.py`，支持 ONNX Runtime 推理、阈值过滤、NMS、JSON 输出和可选标注图输出。
   - README 增补 YOLO 模型放置、运行命令、测试规范与板端禁止安装完整 PyTorch/Ultralytics 训练栈的约束。
   - `.gitignore` 增补 Python 缓存文件，避免语法检查产物进入版本管理。
+
+- `codex-vlm-inference-framework.0.3.0.202607021202`
+  - 新增公开数据集训练配置模板，默认指向 Roboflow `fridge-dataset/fridge-food-images/14`。
+  - 新增本地 YOLO11n 训练环境安装、Roboflow 数据集下载、GitHub 5K Groceries 数据集转换、训练、ONNX 导出和远程模型同步脚本。
+  - 新增公开数据集训练文档，明确 YOLO 只做冰箱食材入口识别，风险判断后续交给 VLM/规则层。
+  - `.gitignore` 增补本地数据集、训练输出、虚拟环境与权重文件忽略规则。

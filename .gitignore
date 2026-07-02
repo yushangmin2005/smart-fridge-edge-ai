@@ -7,8 +7,14 @@ __pycache__/
 # Local secrets and model assets
 config/*.env
 !config/*.env.example
+.venv-yolo/
+data/
 models/
+runs/
+wandb/
 logs/
 run/
 runtime/
 tmp/
+*.pt
+*.onnx
