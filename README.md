@@ -114,6 +114,17 @@ VLM_MODEL_PATH=/home/pi/vlm-inference/models/model.gguf
 VLM_MMPROJ_PATH=/home/pi/vlm-inference/models/mmproj.gguf
 ```
 
+当前 `firecar-pi` 已部署智能冰箱 VLM 模型：
+
+```bash
+VLM_MODEL_PATH=/home/pi/vlm-inference/models/smart-fridge-qwen25vl/smart-fridge-qwen25vl-merged-Q4_K_M.gguf
+VLM_MMPROJ_PATH=/home/pi/vlm-inference/models/smart-fridge-qwen25vl/mmproj-smart-fridge-qwen25vl-Q8_0.gguf
+VLM_CTX_SIZE=2048
+VLM_EXTRA_ARGS="--image-min-tokens 256 --image-max-tokens 768 --jinja"
+```
+
+该模型包来自本机 `/Users/yushangmin/Desktop/smart_fridge_qwen25vl_gguf/`。远端磁盘在部署后剩余约 1.3 GiB；当前参数优先保证 NanoPC-T4 CPU-only 环境可启动。`llama.cpp` 对 Qwen-VL grounding 任务提示 `image-min-tokens=1024` 更适合精细定位，但会进一步增加内存占用与推理时间。
+
 启动、停止与状态检查：
 
 ```bash
@@ -193,6 +204,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 远程运行时检查：`scripts/remote_runtime_check.sh firecar-pi`
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
+- 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
 - YOLO 图片检测测试必须在 ONNX 模型放入 `~/yolo-inference/models` 后进行。
 
@@ -241,3 +253,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 更新公开数据集基线指标：最佳第 66 轮 `mAP50=0.81128`、`mAP50-95=0.58557`，最终第 80 轮 `mAP50=0.80675`、`mAP50-95=0.58047`。
   - 重新导出 ONNX opset 19 模型并同步部署到 `firecar-pi:/home/pi/yolo-inference/models/fridge-yolo11n.onnx`。
   - 完成本地与 `firecar-pi` 远端单图 ONNX 推理冒烟验证，并清理临时验证输出。
+
+- `codex-vlm-inference-framework.0.4.0.202607022022`
+  - 将本机 `smart_fridge_qwen25vl_gguf` 模型包部署到 `firecar-pi:/home/pi/vlm-inference/models/smart-fridge-qwen25vl/`。
+  - 配置远端 `vlm.env` 使用 `smart-fridge-qwen25vl-merged-Q4_K_M.gguf` 与 `mmproj-smart-fridge-qwen25vl-Q8_0.gguf`，并保持 CPU-only、低并发、`ctx=2048` 的保守参数。
+  - 校验远端 GGUF sha256 与本机一致，并启动 `llama-server` 通过 `/v1/models` health 检查。
+  - 使用 `llama-mtmd-cli` 做远端单图冒烟，验证模型加载、图片编码和中文 JSON 输出链路可用；完整 128 token 输出在 900 秒内未结束。
