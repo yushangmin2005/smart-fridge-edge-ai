@@ -113,5 +113,6 @@ food_events
 
 - 板端继续保持 YOLO ONNX Runtime CPU 推理，用于入口检测和候选生成。
 - VLM 继续保持 `llama.cpp` CPU runtime，当前使用智能冰箱 Qwen2.5-VL GGUF 模型。
+- SQLite 主库已落地到 `~/smart-fridge/data/fridge.sqlite3`，通过 `fridge_db.py` 维护 `foods`、`food_observations` 和 `food_events`。
 - OpenCL runtime 只作为实验结果保留，不参与默认链路。
-- 下一步应优先实现一个轻量服务层，串联 YOLO JSON、VLM JSON 和 SQLite 写入，再补 Web UI 或接口展示。
+- 下一步应优先实现一个轻量服务层，调用 YOLO 与 VLM 后使用 `fridge_db.py ingest` 写入 SQLite，再补 Web UI 或接口展示。

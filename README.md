@@ -15,6 +15,7 @@
 - YOLO 训练栈：本地 macOS 使用 `uv` 创建 Python 3.12 虚拟环境，安装 `ultralytics`、`roboflow`、`torch`、`onnx`、`onnxruntime`、`onnxslim`
 - YOLO 导出格式：默认 ONNX opset 19，兼容远程 `onnxruntime==1.16.3`
 - 公开训练数据：默认使用 Roboflow Universe `fridge-dataset/fridge-food-images/14`，手动导出的 YOLO11/YOLOv8 数据集也可放入 `data/fridge-food-images/`
+- 智能冰箱数据库：SQLite，板端默认路径为 `~/smart-fridge/data/fridge.sqlite3`
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -61,6 +62,12 @@ scripts/export_yolo11n_onnx_local.sh
 
 # 将导出的 YOLO 模型同步到 firecar-pi
 scripts/deploy_yolo_model_to_remote.sh firecar-pi
+
+# 部署智能冰箱 SQLite 主库与数据库 CLI
+scripts/deploy_smart_fridge_db.sh firecar-pi
+
+# 检查远程 SQLite schema 与完整性
+scripts/remote_smart_fridge_db_check.sh firecar-pi
 ```
 
 部署后，远程目录结构为：
@@ -90,6 +97,16 @@ YOLO 部署后，远程目录结构为：
   runtime/yolo_detect.py
 ```
 
+智能冰箱数据库部署后，远程目录结构为：
+
+```text
+~/smart-fridge/
+  bin/                 # fridge_db/fridge_db_check 脚本
+  config/smart_fridge.env
+  data/fridge.sqlite3  # SQLite 主库，默认不提交
+  runtime/fridge_db.py
+```
+
 本地 YOLO 训练产物目录为：
 
 ```text
@@ -104,6 +121,35 @@ models/               # 导出的 ONNX/classes 文件，默认不提交
 当前智能冰箱采用混合识别架构：YOLO 负责预识别、入库提醒和重复候选标记；`llama.cpp` 承载的 VLM 主识别服务负责输出食物名称、食物状态评估，并将结构化结果写入数据库。最终判断与建议由数据库中同一食物 ID 的历史内容、最新视觉状态、存放时间和规则层共同生成。
 
 详细职责边界见 [docs/smart-fridge-hybrid-pipeline.md](docs/smart-fridge-hybrid-pipeline.md)。
+
+## 数据库命令
+
+初始化或检查远程 SQLite 主库：
+
+```bash
+ssh firecar-pi '~/smart-fridge/bin/fridge_db.sh init'
+ssh firecar-pi '~/smart-fridge/bin/fridge_db.sh health'
+```
+
+写入一次 YOLO/VLM 观察记录：
+
+```bash
+ssh firecar-pi '~/smart-fridge/bin/fridge_db.sh ingest \
+  --image-ref /home/pi/yolo-inference/samples/test.jpg \
+  --yolo-json /home/pi/yolo-inference/outputs/test.json \
+  --vlm-name 黄瓜 \
+  --vlm-state normal \
+  --vlm-confidence 0.72 \
+  --vlm-description 新鲜蔬菜，外观无明显腐败 \
+  --advice-label normal'
+```
+
+查询当前库存与单个食物历史：
+
+```bash
+ssh firecar-pi '~/smart-fridge/bin/fridge_db.sh list-foods'
+ssh firecar-pi '~/smart-fridge/bin/fridge_db.sh show-food --food-id food_xxx'
+```
 
 ## 模型配置
 
@@ -208,6 +254,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 ## 测试规范
 
 - 本地脚本检查：`bash -n scripts/*.sh`
+- 数据库 CLI 语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_db.py`
+- 本地 SQLite 冒烟：使用临时目录执行 `fridge_db.py init/ingest/list-foods/show-food/health`，完成后删除临时库。
 - 本地训练配置检查：`cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env && scripts/setup_yolo_training_local.sh`
 - 本地训练冒烟：`YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh`，需先准备公开数据集。
 - 本地导出检查：`scripts/export_yolo11n_onnx_local.sh`，需先完成训练并产生 `best.pt`。
@@ -215,6 +263,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 远程运行时检查：`scripts/remote_runtime_check.sh firecar-pi`
 - OpenCL 实验检查：`scripts/deploy_llamacpp_opencl.sh firecar-pi`，默认输出 `opencl_runtime=...` 和 `activated=0`；当前 `llama-server --list-devices` 输出 `unsupported GPU 'Mali-T860'` 与空设备列表，不能切换为默认运行时。
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
+- 远程 SQLite 检查：`scripts/remote_smart_fridge_db_check.sh firecar-pi`
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
@@ -227,6 +276,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 不默认下载大模型。NanoPC-T4 根分区只有约 4.2 GiB 可用空间，模型需按需放入 `~/vlm-inference/models`。
 - 不默认在 `firecar-pi` 上安装 PyTorch/Ultralytics 完整训练栈；板端 YOLO 默认只跑 ONNX Runtime CPU 推理。
 - 不提交 `config/*.env`、公开数据集、训练输出、模型文件、日志、PID 文件或私钥。
+- 不提交 SQLite 主库、WAL/SHM 附属文件或临时数据库。
 - 不删除远程用户目录中与本项目无关的文件。
 
 ## 修改历史
@@ -287,3 +337,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 新增智能冰箱混合识别链路文档，明确 YOLO 负责预识别、入库提醒和重复候选标记。
   - 明确 `llama.cpp` VLM 负责主识别、食物状态评估、数据库写入和结构化观察结果。
   - README 增补 YOLO + VLM + 数据库融合的当前系统职责摘要。
+
+- `codex-vlm-inference-framework.0.6.0.202607022230`
+  - 新增 `smart_fridge_runtime/fridge_db.py`，用 Python 标准库 `sqlite3` 落地 `foods`、`food_observations`、`food_events` 三类核心表。
+  - 新增智能冰箱 SQLite 部署与远程检查脚本，默认数据库路径为 `firecar-pi:~/smart-fridge/data/fridge.sqlite3`。
+  - README 增补数据库部署、初始化、写入观察记录、查询库存和测试规范。
