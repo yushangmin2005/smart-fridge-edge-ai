@@ -124,10 +124,11 @@ VLM_MMPROJ_PATH=/home/pi/vlm-inference/models/mmproj.gguf
 VLM_MODEL_PATH=/home/pi/vlm-inference/models/smart-fridge-qwen25vl/smart-fridge-qwen25vl-merged-Q4_K_M.gguf
 VLM_MMPROJ_PATH=/home/pi/vlm-inference/models/smart-fridge-qwen25vl/mmproj-smart-fridge-qwen25vl-Q8_0.gguf
 VLM_CTX_SIZE=2048
+VLM_TIMEOUT=3600
 VLM_EXTRA_ARGS="--image-min-tokens 256 --image-max-tokens 768 --jinja"
 ```
 
-该模型包来自本机 `/Users/yushangmin/Desktop/smart_fridge_qwen25vl_gguf/`。远端磁盘在部署后剩余约 1.3 GiB；当前参数优先保证 NanoPC-T4 CPU-only 环境可启动。`llama.cpp` 对 Qwen-VL grounding 任务提示 `image-min-tokens=1024` 更适合精细定位，但会进一步增加内存占用与推理时间。
+该模型包来自本机 `/Users/yushangmin/Desktop/smart_fridge_qwen25vl_gguf/`。远端磁盘在部署后剩余约 1.3 GiB；当前参数优先保证 NanoPC-T4 CPU-only 环境可启动。`VLM_TIMEOUT=3600` 将 `llama-server` 读写超时显式固定为 1 小时；发起图片推理的客户端也需要设置不低于 1 小时的 HTTP 超时。`llama.cpp` 对 Qwen-VL grounding 任务提示 `image-min-tokens=1024` 更适合精细定位，但会进一步增加内存占用与推理时间。
 
 启动、停止与状态检查：
 
@@ -270,3 +271,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 针对 NanoPC-T4 的 Mali/OpenCL 2.2 环境关闭 Adreno 专用 OpenCL kernels，并对 b9773 的 QCOM large-buffer OpenCL 3.0 fallback 做条件编译补丁。
   - 实测 OpenCL runtime 能编译成功，但 `llama-server --list-devices` 将 `Mali-T860` 判定为 unsupported 并输出空设备列表，因此当前仍保留 CPU runtime 作为默认方案。
   - 编译测试后恢复原 CPU `llama-server`，并确认 `/v1/models` health 检查可用。
+
+- `codex-vlm-inference-framework.0.4.2.202607022200`
+  - 新增显式 `VLM_TIMEOUT=3600` 配置，将 `llama-server` 读写超时固定为 1 小时。
+  - VLM health 脚本新增 `VLM_HEALTH_TIMEOUT=60`，避免健康检查在网络异常时无限等待。
+  - 同步更新远端 `firecar-pi` 当前 VLM 服务配置，保留 CPU runtime 作为默认方案。

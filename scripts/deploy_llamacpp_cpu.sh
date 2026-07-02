@@ -100,6 +100,8 @@ VLM_PORT=8080
 VLM_THREADS=4
 VLM_CTX_SIZE=2048
 VLM_PARALLEL=1
+VLM_TIMEOUT=3600
+VLM_HEALTH_TIMEOUT=60
 
 # Set exactly one model source before starting the service.
 # Example: VLM_MODEL_HF=ggml-org/SmolVLM-256M-Instruct-GGUF
@@ -155,6 +157,7 @@ fi
 : "${VLM_THREADS:=4}"
 : "${VLM_CTX_SIZE:=2048}"
 : "${VLM_PARALLEL:=1}"
+: "${VLM_TIMEOUT:=3600}"
 : "${VLM_MODEL_HF:=}"
 : "${VLM_MODEL_PATH:=}"
 : "${VLM_MMPROJ_PATH:=}"
@@ -168,6 +171,7 @@ args=(
   --threads "$VLM_THREADS"
   --ctx-size "$VLM_CTX_SIZE"
   --parallel "$VLM_PARALLEL"
+  --timeout "$VLM_TIMEOUT"
 )
 
 if [ -n "$VLM_MODEL_PATH" ]; then
@@ -258,7 +262,8 @@ fi
 
 : "${VLM_PORT:=8080}"
 : "${VLM_HEALTH_HOST:=127.0.0.1}"
-curl -fsS "http://${VLM_HEALTH_HOST}:${VLM_PORT}/v1/models"
+: "${VLM_HEALTH_TIMEOUT:=60}"
+curl --max-time "$VLM_HEALTH_TIMEOUT" -fsS "http://${VLM_HEALTH_HOST}:${VLM_PORT}/v1/models"
 echo
 EOF
 
