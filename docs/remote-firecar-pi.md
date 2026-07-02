@@ -21,8 +21,11 @@
 
 由于 Ubuntu 20.04 默认没有 `libssl.so.3`，且该设备无免密 sudo，不从 Ubuntu 22.04 混装系统包。项目通过 `scripts/deploy_openssl3_user.sh` 在 `~/vlm-inference/runtime/openssl-current` 下提供 OpenSSL 3 用户态共享库。
 
+YOLO 不在该板上安装完整 PyTorch/Ultralytics 训练栈。当前采用 ONNX Runtime CPU 用户态推理，依赖安装到 `~/yolo-inference/runtime/python-packages`，模型通过 `~/yolo-inference/config/yolo.env` 指向导出的 `.onnx` 文件。
+
 ## 推荐模型策略
 
 - 调试优先使用小型 GGUF VLM，例如 llama.cpp 官方多模态文档列出的 `SmolVLM-256M` 或 `SmolVLM-500M`。
 - 微调模型需要先转换/量化为 GGUF，再放入 `~/vlm-inference/models`。
+- YOLO 训练/微调优先在其他机器完成，导出 ONNX 后再放入 `~/yolo-inference/models`。
 - 当前磁盘空间不适合直接放置多份 2B+ 以上模型。

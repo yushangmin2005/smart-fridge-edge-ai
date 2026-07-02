@@ -1,5 +1,7 @@
 *.log
 *.pid
+*.pyc
+__pycache__/
 .DS_Store
 
 # Local secrets and model assets

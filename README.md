@@ -1,6 +1,6 @@
-# 智能消防巡检车 VLM 推理框架
+# 智能消防巡检车边缘 AI 推理框架
 
-当前目标是在远程 `firecar-pi` 上部署可替换模型的 VLM 推理运行时。该设备实际为 NanoPC-T4，Ubuntu 20.04 ARM64，约 3.7 GiB 内存，无 NVIDIA GPU/CUDA/Docker，因此不使用 vLLM/SGLang，而采用 CPU-only 的 `llama.cpp` 多模态推理路线。
+当前目标是在远程 `firecar-pi` 上部署可替换模型的边缘推理运行时。该设备实际为 NanoPC-T4，Ubuntu 20.04 ARM64，约 3.7 GiB 内存，无 NVIDIA GPU/CUDA/Docker，因此 VLM 采用 CPU-only 的 `llama.cpp` 多模态推理路线，YOLO 采用 ONNX Runtime CPU 推理路线。
 
 ## 技术栈
 
@@ -9,6 +9,8 @@
 - 模型格式：GGUF，多模态模型需要模型 GGUF 与可选 `mmproj` GGUF，或直接使用 `-hf` 加载 llama.cpp 支持的多模态仓库
 - 服务接口：`llama-server` OpenAI-compatible `/v1/chat/completions`
 - 部署方式：SSH 用户态安装到远程 `~/vlm-inference`，不依赖 sudo、Docker 或系统级服务
+- YOLO 运行时：`onnxruntime==1.16.3`、`numpy==1.24.4`、`Pillow==10.4.0`，安装到远程 `~/yolo-inference/runtime/python-packages`
+- YOLO 模型格式：ONNX；训练/微调可在其他机器完成，板端只负责加载导出的 `.onnx` 文件
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -25,6 +27,12 @@ scripts/deploy_openssl3_user.sh firecar-pi
 
 # 检查远程运行时二进制是否可用
 scripts/remote_runtime_check.sh firecar-pi
+
+# 部署 YOLO ONNX CPU-only 运行时到远程 ~/yolo-inference
+scripts/deploy_yolo_onnx_cpu.sh firecar-pi
+
+# 检查远程 YOLO Python 依赖与 runner
+scripts/remote_yolo_check.sh firecar-pi
 ```
 
 部署后，远程目录结构为：
@@ -38,6 +46,20 @@ scripts/remote_runtime_check.sh firecar-pi
   models/              # 后续放置微调/量化后的 GGUF 模型
   run/
   runtime/current      # 当前 llama.cpp 运行时软链接
+```
+
+YOLO 部署后，远程目录结构为：
+
+```text
+~/yolo-inference/
+  bin/                 # yolo_env/yolo_detect/yolo_check 脚本
+  config/yolo.env      # 本机实际配置，默认不提交
+  config/yolo.env.example
+  models/              # 放置导出的 YOLO ONNX 模型
+  samples/             # 可选测试图片
+  outputs/             # JSON/标注图输出
+  runtime/python-packages
+  runtime/yolo_detect.py
 ```
 
 ## 模型配置
@@ -68,19 +90,44 @@ ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'
 ssh firecar-pi '~/vlm-inference/bin/stop_vlm.sh'
 ```
 
+YOLO 模型同样不默认下载。导出 ONNX 后放入远程 `~/yolo-inference/models`，再编辑：
+
+```bash
+ssh firecar-pi 'nano ~/yolo-inference/config/yolo.env'
+```
+
+最小配置：
+
+```bash
+YOLO_MODEL_PATH=/home/pi/yolo-inference/models/model.onnx
+YOLO_LABELS=/home/pi/yolo-inference/config/classes.txt
+YOLO_IMG_SIZE=640
+YOLO_CONF=0.25
+YOLO_IOU=0.45
+```
+
+运行单张图片检测：
+
+```bash
+ssh firecar-pi '~/yolo-inference/bin/yolo_detect.sh --image ~/yolo-inference/samples/test.jpg --output-json ~/yolo-inference/outputs/test.json --output-image ~/yolo-inference/outputs/test.jpg'
+```
+
 ## 测试规范
 
 - 本地脚本检查：`bash -n scripts/*.sh`
 - 远程硬件检查：`scripts/remote_probe.sh firecar-pi`
 - 远程运行时检查：`scripts/remote_runtime_check.sh firecar-pi`
+- 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
+- YOLO 图片检测测试必须在 ONNX 模型放入 `~/yolo-inference/models` 后进行。
 
 ## 禁止操作
 
 - 不在 `firecar-pi` 上安装 vLLM/SGLang/Docker/NVIDIA Container Toolkit；该设备无 GPU 且无免密 sudo。
 - 不从 Ubuntu 22.04 强行混装 `libssl3` 到 Ubuntu 20.04；如需 `libssl.so.3`，使用项目用户态 OpenSSL 3。
 - 不默认下载大模型。NanoPC-T4 根分区只有约 4.2 GiB 可用空间，模型需按需放入 `~/vlm-inference/models`。
+- 不默认在 `firecar-pi` 上安装 PyTorch/Ultralytics 完整训练栈；板端 YOLO 默认只跑 ONNX Runtime CPU 推理。
 - 不提交 `config/*.env`、模型文件、日志、PID 文件或私钥。
 - 不删除远程用户目录中与本项目无关的文件。
 
@@ -95,3 +142,9 @@ ssh firecar-pi '~/vlm-inference/bin/stop_vlm.sh'
 - `codex-vlm-inference-framework.0.1.1.202606241212`
   - 新增用户态 OpenSSL 3 部署脚本，用于补齐 Ubuntu 20.04 缺失的 `libssl.so.3/libcrypto.so.3`。
   - VLM 启动与运行时检查脚本支持自动加载 `~/vlm-inference/runtime/openssl-current`。
+
+- `codex-vlm-inference-framework.0.2.0.202607021029`
+  - 新增 YOLO ONNX CPU-only 部署脚本与远程检查脚本。
+  - 新增轻量 `yolo_detect.py`，支持 ONNX Runtime 推理、阈值过滤、NMS、JSON 输出和可选标注图输出。
+  - README 增补 YOLO 模型放置、运行命令、测试规范与板端禁止安装完整 PyTorch/Ultralytics 训练栈的约束。
+  - `.gitignore` 增补 Python 缓存文件，避免语法检查产物进入版本管理。
