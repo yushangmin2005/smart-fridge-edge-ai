@@ -163,10 +163,12 @@ scripts/run_public_yolo_training.sh
 
 - 数据集：Roboflow `fridge-dataset/fridge-food-images/14`
 - 数据规模：train 4172 张、valid 470 张、test 497 张，30 个食材类别
-- 训练模型：`yolo11n.pt`，`imgsz=640`，`batch=8`，Apple MPS
-- 最佳轮次：第 10 轮，`mAP50=0.80546`，`mAP50-95=0.55512`
+- 训练模型：`yolo11n.pt`，`imgsz=640`，`batch=8`，Apple MPS，`epochs=80`，`patience=0`
+- 最佳轮次：第 66 轮，`P=0.81796`，`R=0.74272`，`mAP50=0.81128`，`mAP50-95=0.58557`
+- 最终轮次：第 80 轮，`P=0.81968`，`R=0.73055`，`mAP50=0.80675`，`mAP50-95=0.58047`
 - 本地导出：`models/fridge-yolo11n.onnx` 与 `models/fridge-yolo11n.classes.txt`
 - 远端部署：`firecar-pi:/home/pi/yolo-inference/models/fridge-yolo11n.onnx`
+- 推理验证：本地与 `firecar-pi` 远端单图 ONNX 冒烟均检出 `cucumber`，置信度 `0.852293`
 
 如果暂时没有 Roboflow API key，可先用 GitHub 5K Groceries 数据集验证训练链路：
 
@@ -233,3 +235,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 修复 `scripts/lib_config.sh` 在 macOS Bash 3.2 空 override 数组下触发 `set -u` 的问题。
   - 修复 YOLO 模型远端同步脚本的本地/远端路径解析，避免 `YOLO_REMOTE_DIR=~/...` 被本机展开为 `/Users/...`。
   - 完成本地 ONNX 推理、`firecar-pi` 远端模型加载检查和远端实际图片检测验证。
+
+- `codex-vlm-inference-framework.0.3.2.202607021853`
+  - 从公开数据集 checkpoint 继续训练 YOLO11n 至 80 轮，并使用 `patience=0` 保证跑满目标轮数。
+  - 更新公开数据集基线指标：最佳第 66 轮 `mAP50=0.81128`、`mAP50-95=0.58557`，最终第 80 轮 `mAP50=0.80675`、`mAP50-95=0.58047`。
+  - 重新导出 ONNX opset 19 模型并同步部署到 `firecar-pi:/home/pi/yolo-inference/models/fridge-yolo11n.onnx`。
+  - 完成本地与 `firecar-pi` 远端单图 ONNX 推理冒烟验证，并清理临时验证输出。
