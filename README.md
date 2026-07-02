@@ -99,6 +99,12 @@ models/               # 导出的 ONNX/classes 文件，默认不提交
 .venv-yolo/           # 本地训练虚拟环境，默认不提交
 ```
 
+## 智能冰箱识别链路
+
+当前智能冰箱采用混合识别架构：YOLO 负责预识别、入库提醒和重复候选标记；`llama.cpp` 承载的 VLM 主识别服务负责输出食物名称、食物状态评估，并将结构化结果写入数据库。最终判断与建议由数据库中同一食物 ID 的历史内容、最新视觉状态、存放时间和规则层共同生成。
+
+详细职责边界见 [docs/smart-fridge-hybrid-pipeline.md](docs/smart-fridge-hybrid-pipeline.md)。
+
 ## 模型配置
 
 具体 VLM 尚未固定，因此服务启动前需要在远程编辑：
@@ -276,3 +282,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 新增显式 `VLM_TIMEOUT=3600` 配置，将 `llama-server` 读写超时固定为 1 小时。
   - VLM health 脚本新增 `VLM_HEALTH_TIMEOUT=60`，避免健康检查在网络异常时无限等待。
   - 同步更新远端 `firecar-pi` 当前 VLM 服务配置，保留 CPU runtime 作为默认方案。
+
+- `codex-vlm-inference-framework.0.5.0.202607022217`
+  - 新增智能冰箱混合识别链路文档，明确 YOLO 负责预识别、入库提醒和重复候选标记。
+  - 明确 `llama.cpp` VLM 负责主识别、食物状态评估、数据库写入和结构化观察结果。
+  - README 增补 YOLO + VLM + 数据库融合的当前系统职责摘要。
