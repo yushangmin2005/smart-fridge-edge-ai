@@ -1,6 +1,6 @@
 # 智能消防巡检车边缘 AI 推理框架
 
-当前目标是在远程 `firecar-pi` 上部署可替换模型的边缘推理运行时。该设备实际为 NanoPC-T4，Ubuntu 20.04 ARM64，约 3.7 GiB 内存，无 NVIDIA GPU/CUDA/Docker，因此 VLM 采用 CPU-only 的 `llama.cpp` 多模态推理路线，YOLO 采用 ONNX Runtime CPU 推理路线。
+当前目标是在远程 `firecar-pi` 上部署可替换模型的边缘推理运行时。该设备实际为 NanoPC-T4，Ubuntu 20.04 ARM64，约 3.7 GiB 内存，无 NVIDIA GPU/CUDA/Docker，因此 VLM 默认采用 CPU-only 的 `llama.cpp` 多模态推理路线，YOLO 采用 ONNX Runtime CPU 推理路线。已额外尝试 Mali-T860 OpenCL runtime，但当前 `llama.cpp` OpenCL 后端会将 `Mali-T860` 判定为 unsupported，不能作为默认方案。
 
 ## 技术栈
 
@@ -9,6 +9,7 @@
 - 模型格式：GGUF，多模态模型需要模型 GGUF 与可选 `mmproj` GGUF，或直接使用 `-hf` 加载 llama.cpp 支持的多模态仓库
 - 服务接口：`llama-server` OpenAI-compatible `/v1/chat/completions`
 - 部署方式：SSH 用户态安装到远程 `~/vlm-inference`，不依赖 sudo、Docker 或系统级服务
+- 可选 GPU 实验：`firecar-pi` 有 Mali-T860 OpenCL 1.2 设备，可用 `scripts/deploy_llamacpp_opencl.sh` 编译独立 OpenCL runtime；当前实测只能编译成功，运行时无法枚举为可用 llama.cpp 设备
 - YOLO 运行时：`onnxruntime==1.16.3`、`numpy==1.24.4`、`Pillow==10.4.0`，安装到远程 `~/yolo-inference/runtime/python-packages`
 - YOLO 模型格式：ONNX；训练/微调可在其他机器完成，板端只负责加载导出的 `.onnx` 文件
 - YOLO 训练栈：本地 macOS 使用 `uv` 创建 Python 3.12 虚拟环境，安装 `ultralytics`、`roboflow`、`torch`、`onnx`、`onnxruntime`、`onnxslim`
@@ -30,6 +31,9 @@ scripts/deploy_openssl3_user.sh firecar-pi
 
 # 检查远程运行时二进制是否可用
 scripts/remote_runtime_check.sh firecar-pi
+
+# 实验性编译 llama.cpp OpenCL runtime；默认不切换 runtime/current
+scripts/deploy_llamacpp_opencl.sh firecar-pi
 
 # 部署 YOLO ONNX CPU-only 运行时到远程 ~/yolo-inference
 scripts/deploy_yolo_onnx_cpu.sh firecar-pi
@@ -202,6 +206,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 本地导出检查：`scripts/export_yolo11n_onnx_local.sh`，需先完成训练并产生 `best.pt`。
 - 远程硬件检查：`scripts/remote_probe.sh firecar-pi`
 - 远程运行时检查：`scripts/remote_runtime_check.sh firecar-pi`
+- OpenCL 实验检查：`scripts/deploy_llamacpp_opencl.sh firecar-pi`，默认输出 `opencl_runtime=...` 和 `activated=0`；当前 `llama-server --list-devices` 输出 `unsupported GPU 'Mali-T860'` 与空设备列表，不能切换为默认运行时。
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
@@ -259,3 +264,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 配置远端 `vlm.env` 使用 `smart-fridge-qwen25vl-merged-Q4_K_M.gguf` 与 `mmproj-smart-fridge-qwen25vl-Q8_0.gguf`，并保持 CPU-only、低并发、`ctx=2048` 的保守参数。
   - 校验远端 GGUF sha256 与本机一致，并启动 `llama-server` 通过 `/v1/models` health 检查。
   - 使用 `llama-mtmd-cli` 做远端单图冒烟，验证模型加载、图片编码和中文 JSON 输出链路可用；完整 128 token 输出在 900 秒内未结束。
+
+- `codex-vlm-inference-framework.0.4.1.202607022154`
+  - 新增实验性 `scripts/deploy_llamacpp_opencl.sh`，可在 `firecar-pi` 上编译独立 `llama-b9773-opencl` runtime，默认不切换 `runtime/current`。
+  - 针对 NanoPC-T4 的 Mali/OpenCL 2.2 环境关闭 Adreno 专用 OpenCL kernels，并对 b9773 的 QCOM large-buffer OpenCL 3.0 fallback 做条件编译补丁。
+  - 实测 OpenCL runtime 能编译成功，但 `llama-server --list-devices` 将 `Mali-T860` 判定为 unsupported 并输出空设备列表，因此当前仍保留 CPU runtime 作为默认方案。
+  - 编译测试后恢复原 CPU `llama-server`，并确认 `/v1/models` health 检查可用。
