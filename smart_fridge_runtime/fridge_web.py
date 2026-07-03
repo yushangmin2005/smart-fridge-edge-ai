@@ -565,10 +565,6 @@ INDEX_HTML = r"""<!doctype html>
 
     <aside class="stack">
       <section class="band">
-        <div class="section-head"><h2>最近裁剪</h2><span class="muted">新增目标</span></div>
-        <div class="content"><div class="thumbs" id="crops"></div></div>
-      </section>
-      <section class="band">
         <div class="section-head"><h2>最近照片</h2><span class="muted">最多 24 张</span></div>
         <div class="content"><div class="thumbs" id="captures"></div></div>
       </section>
@@ -761,7 +757,6 @@ INDEX_HTML = r"""<!doctype html>
       renderFoods(data);
       renderEvents(data);
       renderActiveObjects(data);
-      renderThumbs("crops", data.crops || []);
       renderThumbs("captures", data.captures || []);
       $("logs").textContent = (data.log_tail || []).join("\n") || "暂无日志";
     }

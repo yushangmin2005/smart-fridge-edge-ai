@@ -186,7 +186,7 @@ http://192.168.110.190:8090/
 页面展示内容：
 
 - 当前服务状态：pipeline、VLM、Web 进程是否运行。
-- 最新拍照画面、最近裁剪图和最近 24 张临时照片。
+- 最新拍照画面和最近 24 张临时照片。
 - 当前库存、食物新鲜度、风险建议、置信度和 `food_id`。
 - 最近 `food.created`、`food.updated`、`food.removed` 变化事件。
 - 最近一轮识别摘要、YOLO/VLM 输出文件和管线日志 tail。
@@ -438,7 +438,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 
 - `codex-vlm-inference-framework.0.8.0.202607031429`
   - 新增 `smart_fridge_runtime/fridge_web.py`，使用 Python 标准库提供智能冰箱 Web 状态面板和 JSON API。
-  - Web 页面展示最新拍照、最近裁剪图、当前库存、食物状态、变化事件、active objects 和管线日志。
+  - Web 页面展示最新拍照、当前库存、食物状态、变化事件、active objects 和管线日志。
   - 部署脚本新增 `fridge_web.sh`、`start_web.sh`、`stop_web.sh`、`status_web.sh`，默认监听 `0.0.0.0:8090`。
   - 配置样例新增 `SMART_FRIDGE_WEB_HOST`、`SMART_FRIDGE_WEB_PORT`、`SMART_FRIDGE_WEB_REFRESH_SECONDS`。
 
@@ -449,3 +449,6 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - `codex-vlm-inference-framework.0.8.2.202607031452`
   - 修复 Web 前端在浏览器缩放、平板宽度和手机宽度下的横向溢出问题。
   - 给主网格、卡片、表格容器和事件文本补充响应式收缩与断行规则，库存表格改为容器内横向滚动。
+
+- `codex-vlm-inference-framework.0.8.3.202607031455`
+  - Web 前端移除“最近裁剪”展示卡片，保留裁剪文件和 JSON API 字段用于调试。
