@@ -558,6 +558,38 @@ def command_health(args):
     return 0 if integrity == "ok" else 1
 
 
+def command_reset(args):
+    if not args.yes:
+        print_json(
+            {
+                "ok": False,
+                "error": "confirmation_required",
+                "hint": "Re-run with --yes to delete all foods, observations, and events.",
+            }
+        )
+        return 2
+
+    with connect(args.db) as conn:
+        init_schema(conn)
+        before = {
+            "foods": conn.execute("SELECT COUNT(*) FROM foods").fetchone()[0],
+            "food_observations": conn.execute("SELECT COUNT(*) FROM food_observations").fetchone()[0],
+            "food_events": conn.execute("SELECT COUNT(*) FROM food_events").fetchone()[0],
+        }
+        with conn:
+            conn.execute("DELETE FROM food_events")
+            conn.execute("DELETE FROM food_observations")
+            conn.execute("DELETE FROM foods")
+        conn.execute("VACUUM")
+        after = {
+            "foods": conn.execute("SELECT COUNT(*) FROM foods").fetchone()[0],
+            "food_observations": conn.execute("SELECT COUNT(*) FROM food_observations").fetchone()[0],
+            "food_events": conn.execute("SELECT COUNT(*) FROM food_events").fetchone()[0],
+        }
+    print_json({"ok": True, "db": str(Path(args.db).expanduser()), "before": before, "after": after})
+    return 0
+
+
 def print_json(payload):
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
@@ -618,6 +650,10 @@ def parse_args(argv):
 
     health_parser = subparsers.add_parser("health", help="Run integrity and schema checks.")
     health_parser.set_defaults(func=command_health)
+
+    reset_parser = subparsers.add_parser("reset", help="Delete all inventory test data while keeping the schema.")
+    reset_parser.add_argument("--yes", action="store_true", help="Confirm deleting all food records and events.")
+    reset_parser.set_defaults(func=command_reset)
 
     return parser.parse_args(argv)
 

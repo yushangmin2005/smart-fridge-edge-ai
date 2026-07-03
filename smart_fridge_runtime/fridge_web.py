@@ -147,6 +147,7 @@ class SmartFridgeStore:
         self.crop_dir = Path(env("SMART_FRIDGE_CROP_DIR", str(self.tmp_dir / "crops"))).expanduser()
         self.yolo_dir = Path(env("SMART_FRIDGE_YOLO_OUTPUT_DIR", str(self.tmp_dir / "yolo"))).expanduser()
         self.vlm_dir = Path(env("SMART_FRIDGE_VLM_OUTPUT_DIR", str(self.tmp_dir / "vlm"))).expanduser()
+        self.alerts_path = Path(env("SMART_FRIDGE_ALERTS_PATH", str(root / "data" / "alerts.json"))).expanduser()
         self.pipeline_log = Path(env("SMART_FRIDGE_PIPELINE_LOG", str(root / "logs" / "fridge-pipeline.log"))).expanduser()
         self.pipeline_pid = Path(env("SMART_FRIDGE_PIPELINE_PID", str(root / "run" / "fridge-pipeline.pid"))).expanduser()
         self.web_pid = Path(env("SMART_FRIDGE_WEB_PID", str(root / "run" / "fridge-web.pid"))).expanduser()
@@ -284,6 +285,7 @@ class SmartFridgeStore:
             "events": self.recent_events(40),
             "observations": self.observations(20),
             "state": state,
+            "alerts": read_json(self.alerts_path, {"alerts": [], "generated_at": None}) or {"alerts": []},
             "active_objects": active_objects,
             "cloud_advice": state.get("cloud_advice") or {},
             "latest_capture": latest_capture,
@@ -482,6 +484,20 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--text);
     }
     .advice-list li { margin: 4px 0; overflow-wrap: anywhere; }
+    .alert-list { display: grid; gap: 8px; }
+    .alert {
+      border: 1px solid var(--line);
+      border-left-width: 4px;
+      border-radius: 6px;
+      padding: 9px 10px;
+      background: #fbfcfd;
+      overflow-wrap: anywhere;
+    }
+    .alert.ok { border-left-color: var(--ok); }
+    .alert.warning { border-left-color: var(--warn); }
+    .alert.critical { border-left-color: var(--bad); }
+    .alert strong { display: block; margin-bottom: 2px; }
+    .alert p { margin: 0; color: var(--muted); font-size: 12px; }
     code { overflow-wrap: anywhere; word-break: break-word; }
     .thumbs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; min-width: 0; }
     .thumb {
@@ -576,6 +592,11 @@ INDEX_HTML = r"""<!doctype html>
       </section>
 
       <section class="band">
+        <div class="section-head"><h2>异常提醒</h2><span class="muted" id="alertsTime">-</span></div>
+        <div class="content"><div class="alert-list" id="alerts"></div></div>
+      </section>
+
+      <section class="band">
         <div class="section-head"><h2>最新画面</h2><span class="muted" id="captureTime">-</span></div>
         <div class="content split">
           <div class="photo-wrap" id="photoBox"><span class="muted">暂无照片</span></div>
@@ -649,6 +670,8 @@ INDEX_HTML = r"""<!doctype html>
       "stopped": "已停止",
       "unknown": "未知",
       "normal": "正常",
+      "warning": "警告",
+      "critical": "严重",
       "attention": "需注意",
       "danger": "危险",
       "closed": "已结束",
@@ -708,7 +731,7 @@ INDEX_HTML = r"""<!doctype html>
     const zhList = (items) => Array.isArray(items) ? items.map(zh).join("、") : zh(items);
     const badgeClass = (value) => {
       const text = String(value || "").toLowerCase();
-      if (text.includes("danger") || text.includes("removed") || text.includes("失败") || text.includes("危险") || text.includes("移除")) return "bad";
+      if (text.includes("critical") || text.includes("danger") || text.includes("removed") || text.includes("失败") || text.includes("危险") || text.includes("移除") || text.includes("严重")) return "bad";
       if (text.includes("attention") || text.includes("warning") || text.includes("unknown") || text.includes("注意") || text.includes("未知")) return "warn";
       if (text.includes("normal") || text.includes("running") || text === "ok" || text.includes("正常") || text.includes("在库") || text.includes("运行")) return "ok";
       return "info";
@@ -815,6 +838,26 @@ INDEX_HTML = r"""<!doctype html>
       `).join("") : "";
     }
 
+    function renderAlerts(data) {
+      const payload = data.alerts || {};
+      const alerts = payload.alerts || [];
+      $("alertsTime").textContent = payload.generated_at ? fmtTime(payload.generated_at) : "等待检查";
+      if (!payload.generated_at) {
+        $("alerts").innerHTML = `<div class="alert warning"><strong>等待维护检查</strong><p>维护定时器首次运行后会显示磁盘、服务、数据库和接口状态。</p></div>`;
+        return;
+      }
+      if (!alerts.length) {
+        $("alerts").innerHTML = `<div class="alert ok"><strong>暂无异常</strong><p>磁盘、服务、数据库和接口检查通过。</p></div>`;
+        return;
+      }
+      $("alerts").innerHTML = alerts.map((alert) => `
+        <div class="alert ${escapeHtml(alert.severity || "warning")}">
+          <strong>${badge(alert.severity || "warning")} ${escapeHtml(alert.title || alert.id || "异常")}</strong>
+          <p>${escapeHtml(alert.detail || "")}</p>
+        </div>
+      `).join("");
+    }
+
     function serviceText(label, service) {
       const state = service?.running ? "运行中" : "未确认";
       return `${label}${state}${service?.pid ? `(${service.pid})` : ""}`;
@@ -891,6 +934,7 @@ INDEX_HTML = r"""<!doctype html>
       renderFoods(data);
       renderEvents(data);
       renderActiveObjects(data);
+      renderAlerts(data);
       renderCloudAdvice(data);
       renderThumbs("captures", data.captures || []);
       renderDebug(data, lastCycle);
