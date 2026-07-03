@@ -18,6 +18,7 @@
 - 智能冰箱数据库：SQLite，板端默认路径为 `~/smart-fridge/data/fridge.sqlite3`
 - 智能冰箱调度：`ffmpeg` + v4l2 每 1 小时拍照一次，默认使用 `/dev/video10` UVC 摄像头
 - 智能冰箱 Web 前端：Python 标准库 `http.server` + SQLite 只读查询，默认端口 `8090`
+- 远端维护工具：Pi Coding Agent `@earendil-works/pi-coding-agent`，用户态安装到 `firecar-pi:~/.local`
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -80,6 +81,9 @@ ssh firecar-pi '~/smart-fridge/bin/stop_pipeline.sh'
 ssh firecar-pi '~/smart-fridge/bin/start_web.sh'
 ssh firecar-pi '~/smart-fridge/bin/status_web.sh'
 ssh firecar-pi '~/smart-fridge/bin/stop_web.sh'
+
+# 查看远端 Pi agent 版本
+ssh firecar-pi 'bash -lc "pi --version; piagent --version"'
 ```
 
 部署后，远程目录结构为：
@@ -137,6 +141,16 @@ runs/                 # Ultralytics 训练输出，默认不提交
 models/               # 导出的 ONNX/classes 文件，默认不提交
 .venv-yolo/           # 本地训练虚拟环境，默认不提交
 ```
+
+远端 Pi agent 安装位置：
+
+```text
+~/.local/bin/pi       # Pi Coding Agent 主命令
+~/bin/pi              # 用户 PATH 软链接
+~/bin/piagent         # 兼容命令名，指向同一 Pi CLI
+```
+
+非交互 SSH 不一定加载远端用户 PATH，检查或调用 Pi agent 时优先使用 `ssh firecar-pi 'bash -lc "pi --version"'`，或直接调用 `~/.local/bin/pi`。
 
 ## 智能冰箱识别链路
 
@@ -348,6 +362,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
 - YOLO 图片检测测试必须在 ONNX 模型放入 `~/yolo-inference/models` 后进行。
+- 远端 Pi agent 检查：`ssh firecar-pi 'bash -lc "pi --version; piagent --version"'`，当前版本为 `0.80.3`。
 
 ## 禁止操作
 
@@ -461,3 +476,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - `codex-vlm-inference-framework.0.8.5.202607031506`
   - Web 面板新增“下次识别”时间，优先使用管线摘要中的 `next_scheduled_at`，旧日志回退为上一轮识别时间加识别间隔。
   - 自动识别管线摘要新增 `completed_at` 和 `next_scheduled_at` 字段，便于前端展示下一轮计划时间。
+
+- `codex-vlm-inference-framework.0.8.6.202607031515`
+  - 在 `firecar-pi` 用户态安装 Pi Coding Agent `@earendil-works/pi-coding-agent@0.80.3`。
+  - 新增 `~/bin/pi` 与 `~/bin/piagent` 软链接，并将 `~/bin`、`~/.local/bin` 写入远端 `~/.profile` 与 `~/.bashrc`。
+  - README 增补远端 Pi agent 安装位置、版本检查命令和测试规范。
