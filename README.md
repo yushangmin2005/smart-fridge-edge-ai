@@ -445,3 +445,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - `codex-vlm-inference-framework.0.8.1.202607031443`
   - Web 前端增加展示层汉化映射，不改变 SQLite 和 JSON API 的原始字段值。
   - 将页面中的运行状态、库存状态、新鲜度、风险等级、变化事件和常见 YOLO 食材类别显示为中文。
+
+- `codex-vlm-inference-framework.0.8.2.202607031452`
+  - 修复 Web 前端在浏览器缩放、平板宽度和手机宽度下的横向溢出问题。
+  - 给主网格、卡片、表格容器和事件文本补充响应式收缩与断行规则，库存表格改为容器内横向滚动。
