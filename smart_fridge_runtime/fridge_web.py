@@ -285,6 +285,7 @@ class SmartFridgeStore:
             "observations": self.observations(20),
             "state": state,
             "active_objects": active_objects,
+            "cloud_advice": state.get("cloud_advice") or {},
             "latest_capture": latest_capture,
             "captures": captures,
             "crops": crops,
@@ -467,6 +468,20 @@ INDEX_HTML = r"""<!doctype html>
     }
     .event strong { display: block; font-size: 13px; overflow-wrap: anywhere; word-break: break-word; }
     .event p { margin: 3px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; word-break: break-word; }
+    .advice-summary {
+      padding: 10px 12px;
+      border: 1px solid var(--soft);
+      border-radius: 6px;
+      background: #fbfcfd;
+      margin-bottom: 10px;
+      overflow-wrap: anywhere;
+    }
+    .advice-list {
+      margin: 0 0 12px;
+      padding-left: 18px;
+      color: var(--text);
+    }
+    .advice-list li { margin: 4px 0; overflow-wrap: anywhere; }
     code { overflow-wrap: anywhere; word-break: break-word; }
     .thumbs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; min-width: 0; }
     .thumb {
@@ -571,6 +586,15 @@ INDEX_HTML = r"""<!doctype html>
             <div class="kv"><span>下次识别</span><span id="nextRecognition">-</span></div>
             <div class="kv"><span>照片保留</span><span id="captureCount">-</span></div>
           </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="section-head"><h2>云端建议</h2><span class="muted" id="cloudAdviceTime">-</span></div>
+        <div class="content">
+          <div class="advice-summary" id="cloudAdviceSummary">等待下一轮自动识别</div>
+          <ul class="advice-list" id="cloudAdviceActions"></ul>
+          <div class="timeline" id="cloudAdviceItems"></div>
         </div>
       </section>
 
@@ -761,6 +785,36 @@ INDEX_HTML = r"""<!doctype html>
       `).join("") : `<div class="empty">当前画面没有识别到食物</div>`;
     }
 
+    function renderCloudAdvice(data) {
+      const advice = data.cloud_advice || data.state?.cloud_advice || {};
+      $("cloudAdviceTime").textContent = advice.generated_at ? `${zh(advice.risk_level || "unknown")} · ${fmtTime(advice.generated_at)}` : "-";
+      if (!advice.generated_at && !advice.summary && !advice.error && !advice.reason) {
+        $("cloudAdviceSummary").textContent = "等待下一轮自动识别";
+        $("cloudAdviceActions").innerHTML = "";
+        $("cloudAdviceItems").innerHTML = "";
+        return;
+      }
+      if (!advice.ok) {
+        const reason = advice.reason === "missing_deepseek_api_key" ? "缺少 DeepSeek key" : (advice.reason || advice.error || "暂不可用");
+        $("cloudAdviceSummary").textContent = advice.skipped ? `云端建议已跳过：${reason}` : `云端建议暂不可用：${reason}`;
+        $("cloudAdviceActions").innerHTML = "";
+        $("cloudAdviceItems").innerHTML = "";
+        return;
+      }
+      $("cloudAdviceSummary").innerHTML = `${badge(advice.risk_level || "unknown")} ${escapeHtml(advice.summary || "暂无云端建议")}`;
+      const actions = advice.action_items || [];
+      $("cloudAdviceActions").innerHTML = actions.length
+        ? actions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")
+        : "";
+      const items = advice.item_suggestions || [];
+      $("cloudAdviceItems").innerHTML = items.length ? items.map((item) => `
+        <div class="event">
+          <strong>${escapeHtml(zh(item.name || "食物"))} · ${badge(item.priority || "normal")}</strong>
+          <p>${escapeHtml(item.suggestion || "暂无单项建议")}</p>
+        </div>
+      `).join("") : "";
+    }
+
     function serviceText(label, service) {
       const state = service?.running ? "运行中" : "未确认";
       return `${label}${state}${service?.pid ? `(${service.pid})` : ""}`;
@@ -837,6 +891,7 @@ INDEX_HTML = r"""<!doctype html>
       renderFoods(data);
       renderEvents(data);
       renderActiveObjects(data);
+      renderCloudAdvice(data);
       renderThumbs("captures", data.captures || []);
       renderDebug(data, lastCycle);
     }

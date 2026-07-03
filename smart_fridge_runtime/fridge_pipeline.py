@@ -22,6 +22,16 @@ DEFAULT_PROMPT = """Return exactly one JSON object for the visible food crop.
 Required keys: is_food, food_name, category, composition, freshness, freshness_score,
 visible_state, storage_advice, risk_level, confidence, notes."""
 
+CLOUD_ADVICE_PROMPT = """你是智能冰箱的云端综合建议模型。你会收到当前仍然活跃的食物对象、
+本轮新增/移除/未变信息和基础运行状态。请只输出一个 JSON 对象，不要输出 Markdown。
+字段要求：
+- summary: 一句话总结当前冰箱状态。
+- risk_level: normal、attention、danger 或 unknown。
+- action_items: 字符串数组，给出 1 到 5 条可执行建议。
+- item_suggestions: 数组，每项包含 food_id、name、suggestion、priority。
+- next_check: 一句话说明下次应重点观察什么。
+如果没有活跃对象，也要给出简短说明。"""
+
 
 def utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -397,6 +407,157 @@ def extract_chat_content(response_payload):
     return str(message)
 
 
+def load_deepseek_api_key():
+    for name in ("SMART_FRIDGE_CLOUD_ADVICE_API_KEY", "DEEPSEEK_API_KEY"):
+        value = env(name)
+        if value:
+            return value
+    auth_path = Path(env("SMART_FRIDGE_CLOUD_ADVICE_AUTH_PATH", str(Path.home() / ".pi" / "agent" / "auth.json"))).expanduser()
+    try:
+        auth = read_json(auth_path, {}) or {}
+    except Exception:
+        return ""
+    credential = auth.get("deepseek") or {}
+    if credential.get("type") == "api_key":
+        return credential.get("key") or ""
+    return ""
+
+
+def compact_active_object(item):
+    vlm = item.get("vlm") or {}
+    return {
+        "food_id": item.get("food_id"),
+        "yolo_label": item.get("yolo_label"),
+        "confidence": item.get("confidence"),
+        "first_seen_at": item.get("first_seen_at"),
+        "last_seen_at": item.get("last_seen_at"),
+        "food_name": vlm.get("food_name"),
+        "category": vlm.get("category"),
+        "composition": vlm.get("composition") or [],
+        "freshness": vlm.get("freshness"),
+        "freshness_score": vlm.get("freshness_score"),
+        "visible_state": vlm.get("visible_state"),
+        "storage_advice": vlm.get("storage_advice"),
+        "risk_level": vlm.get("risk_level"),
+        "notes": vlm.get("notes"),
+    }
+
+
+def normalize_cloud_advice(payload):
+    result = dict(payload or {})
+    result.setdefault("summary", "暂无云端建议。")
+    result.setdefault("risk_level", "unknown")
+    result.setdefault("action_items", [])
+    result.setdefault("item_suggestions", [])
+    result.setdefault("next_check", "")
+    if not isinstance(result.get("action_items"), list):
+        result["action_items"] = [str(result["action_items"])]
+    if not isinstance(result.get("item_suggestions"), list):
+        result["item_suggestions"] = []
+    normalized_items = []
+    for item in result["item_suggestions"]:
+        if not isinstance(item, dict):
+            continue
+        normalized_items.append(
+            {
+                "food_id": item.get("food_id"),
+                "name": item.get("name") or item.get("food_name") or "",
+                "suggestion": item.get("suggestion") or "",
+                "priority": item.get("priority") or "normal",
+            }
+        )
+    result["item_suggestions"] = normalized_items
+    return result
+
+
+def load_mock_cloud_advice(mock_value):
+    if not mock_value:
+        return None
+    if mock_value.strip().startswith("{"):
+        return normalize_cloud_advice(json.loads(mock_value))
+    path = Path(mock_value)
+    if path.exists():
+        return normalize_cloud_advice(read_json(path, {}))
+    raise RuntimeError("SMART_FRIDGE_CLOUD_ADVICE_MOCK_JSON does not point to a JSON object or file")
+
+
+def request_cloud_advice(active_objects, cycle_summary):
+    generated_at = utc_now()
+    model = env("SMART_FRIDGE_CLOUD_ADVICE_MODEL", "deepseek-v4-flash")
+    provider = env("SMART_FRIDGE_CLOUD_ADVICE_PROVIDER", "deepseek")
+    base = {
+        "ok": False,
+        "provider": provider,
+        "model": model,
+        "generated_at": generated_at,
+        "active_object_count": len(active_objects),
+    }
+    if not env_bool("SMART_FRIDGE_CLOUD_ADVICE_ENABLED", True):
+        return dict(base, skipped=True, reason="disabled")
+
+    mock = load_mock_cloud_advice(env("SMART_FRIDGE_CLOUD_ADVICE_MOCK_JSON"))
+    if mock is not None:
+        result = dict(base)
+        result.update(mock)
+        result["ok"] = True
+        result["mock"] = True
+        return result
+
+    api_key = load_deepseek_api_key()
+    if not api_key:
+        return dict(base, skipped=True, reason="missing_deepseek_api_key")
+
+    compact_objects = [compact_active_object(item) for item in active_objects]
+    user_payload = {
+        "captured_at": cycle_summary.get("captured_at"),
+        "completed_at": cycle_summary.get("completed_at"),
+        "next_scheduled_at": cycle_summary.get("next_scheduled_at"),
+        "detections": cycle_summary.get("detections"),
+        "active_count": cycle_summary.get("active_count"),
+        "added": cycle_summary.get("added") or [],
+        "unchanged": cycle_summary.get("unchanged") or [],
+        "removed": cycle_summary.get("removed") or [],
+        "active_objects": compact_objects,
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": CLOUD_ADVICE_PROMPT},
+            {
+                "role": "user",
+                "content": "请根据以下智能冰箱活跃对象给出综合建议：\n"
+                + json.dumps(user_payload, ensure_ascii=False, separators=(",", ":")),
+            },
+        ],
+        "temperature": env_float("SMART_FRIDGE_CLOUD_ADVICE_TEMPERATURE", 0.2),
+        "max_tokens": env_int("SMART_FRIDGE_CLOUD_ADVICE_MAX_TOKENS", 600),
+    }
+    if env_bool("SMART_FRIDGE_CLOUD_ADVICE_USE_RESPONSE_FORMAT", True):
+        payload["response_format"] = {"type": "json_object"}
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        env("SMART_FRIDGE_CLOUD_ADVICE_URL", "https://api.deepseek.com/chat/completions"),
+        data=body,
+        headers={"Content-Type": "application/json", "Authorization": "Bearer {0}".format(api_key)},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=env_int("SMART_FRIDGE_CLOUD_ADVICE_TIMEOUT", 120)) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+        content = extract_chat_content(response_payload)
+        advice = normalize_cloud_advice(extract_json_object(content))
+        result = dict(base)
+        result.update(advice)
+        result["ok"] = True
+        return result
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return dict(base, error="HTTP {0}: {1}".format(exc.code, detail[:500]))
+    except Exception as exc:
+        return dict(base, error=str(exc))
+
+
 def normalize_vlm_result(payload):
     result = dict(payload or {})
     result.setdefault("is_food", True)
@@ -747,14 +908,6 @@ def run_once(args):
             errors.append({"stage": "remove", "food_id": previous.get("food_id"), "error": str(exc)})
         removed.append({"food_id": previous.get("food_id"), "yolo_label": previous.get("yolo_label"), "db_result": result})
 
-    state = {
-        "updated_at": now,
-        "last_image_ref": image_path,
-        "last_yolo_json": str(paths["yolo_json"]),
-        "active_objects": current_objects,
-    }
-    write_json(state_path, state)
-
     completed_at = datetime.now(timezone.utc).replace(microsecond=0)
     interval = env_int("SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS", 3600)
     summary = {
@@ -774,6 +927,17 @@ def run_once(args):
         "state_path": str(state_path),
         "errors": errors,
     }
+    state = {
+        "updated_at": now,
+        "last_image_ref": image_path,
+        "last_yolo_json": str(paths["yolo_json"]),
+        "active_objects": current_objects,
+    }
+    write_json(state_path, state)
+    cloud_advice = request_cloud_advice(current_objects, summary)
+    summary["cloud_advice"] = cloud_advice
+    state["cloud_advice"] = cloud_advice
+    write_json(state_path, state)
     return summary
 
 

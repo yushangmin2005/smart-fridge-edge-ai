@@ -19,6 +19,7 @@
 - 智能冰箱调度：`ffmpeg` + v4l2 每 1 小时拍照一次，默认使用 `/dev/video10` UVC 摄像头
 - 智能冰箱 Web 前端：Python 标准库 `http.server` + SQLite 只读查询，默认端口 `8090`
 - 远端维护工具：Pi Coding Agent `@earendil-works/pi-coding-agent`，用户态安装到 `firecar-pi:~/.local`
+- 云端建议：每轮自动识别后将当前 active objects 发送到 DeepSeek `deepseek-v4-flash`，结构化建议写入 `pipeline_state.json`
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -195,9 +196,14 @@ SMART_FRIDGE_CAMERA_DEVICE=/dev/video10
 SMART_FRIDGE_YOLO_BIN=/home/pi/yolo-inference/bin/yolo_detect.sh
 SMART_FRIDGE_VLM_URL=http://127.0.0.1:8080/v1/chat/completions
 SMART_FRIDGE_VLM_TIMEOUT=3600
+SMART_FRIDGE_CLOUD_ADVICE_ENABLED=1
+SMART_FRIDGE_CLOUD_ADVICE_MODEL=deepseek-v4-flash
+SMART_FRIDGE_CLOUD_ADVICE_AUTH_PATH=/home/pi/.pi/agent/auth.json
 ```
 
 VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。
+
+每轮自动识别完成后，管线会把当前 `active_objects`、本轮新增/未变/移除摘要和下次识别时间发送给 DeepSeek 云端模型，要求返回 JSON：`summary`、`risk_level`、`action_items`、`item_suggestions`、`next_check`。结果写入 `~/smart-fridge/data/pipeline_state.json` 的 `cloud_advice` 字段，并由 Web 面板展示。DeepSeek API key 默认从远端 Pi agent 的 `~/.pi/agent/auth.json` 读取，不写入项目仓库。
 
 ## Web 状态面板
 
@@ -218,7 +224,7 @@ http://192.168.110.190:8090/
 
 - 自动识别和主识别服务是否可用，默认不展示 PID。
 - 最新拍照画面、下次识别时间和最近 24 张临时照片。
-- 当前库存、需注意数量、食物新鲜度和风险建议。
+- 云端综合建议、当前库存、需注意数量、食物新鲜度和风险建议。
 - 最近入库、更新、移除变化事件。
 - 折叠调试信息：数据库路径、服务 PID、YOLO/VLM 输出文件和管线日志 tail。
 
@@ -381,6 +387,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - YOLO 图片检测测试必须在 ONNX 模型放入 `~/yolo-inference/models` 后进行。
 - 远端 Pi agent 检查：`ssh firecar-pi 'bash -lc "pi --version; piagent --version"'`，当前版本为 `0.80.3`。
 - 远端 Pi agent DeepSeek 检查：`ssh firecar-pi 'bash -lc "pi --list-models deepseek"'`，并用 `deepseek-v4-flash` 做最小 `pong` 请求。
+- 云端建议检查：使用 `SMART_FRIDGE_CLOUD_ADVICE_MOCK_JSON` 做本地/远端隔离冒烟；正式链路通过 `pipeline_state.json.cloud_advice.ok=true` 和 Web “云端建议”卡片验证。
 
 ## 禁止操作
 
@@ -504,3 +511,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 在 `firecar-pi` 的 `~/.pi/agent/auth.json` 中配置 DeepSeek API key，文件权限固定为 `0600`，key 不写入 README 或 Git。
   - 在 `~/.pi/agent/settings.json` 中设置 Pi agent 默认 `defaultProvider=deepseek`、`defaultModel=deepseek-v4-flash`。
   - 远端验证 `pi --list-models deepseek` 可见 `deepseek-v4-flash`、`deepseek-v4-pro`，并通过最小 `pong` 请求确认 DeepSeek 服务可用。
+
+- `codex-vlm-inference-framework.0.9.0.202607031559`
+  - 自动识别管线新增云端建议步骤：每轮完成 active objects 更新后调用 DeepSeek，返回综合摘要、风险等级、行动建议和单项食物建议。
+  - `pipeline_state.json` 新增 `cloud_advice` 字段；Web 面板新增“云端建议”卡片展示最新云端综合判断。
+  - 配置模板和部署脚本新增 `SMART_FRIDGE_CLOUD_ADVICE_*` 配置项，默认从远端 Pi agent `auth.json` 读取 DeepSeek key，不在项目配置中保存明文 key。
