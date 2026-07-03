@@ -148,9 +148,26 @@ models/               # 导出的 ONNX/classes 文件，默认不提交
 ~/.local/bin/pi       # Pi Coding Agent 主命令
 ~/bin/pi              # 用户 PATH 软链接
 ~/bin/piagent         # 兼容命令名，指向同一 Pi CLI
+~/.pi/agent/auth.json # Pi agent 认证文件，权限 0600，默认不提交
+~/.pi/agent/settings.json # Pi agent 全局设置，权限 0600，默认不提交
 ```
 
 非交互 SSH 不一定加载远端用户 PATH，检查或调用 Pi agent 时优先使用 `ssh firecar-pi 'bash -lc "pi --version"'`，或直接调用 `~/.local/bin/pi`。
+
+当前远端 Pi agent 已配置 DeepSeek 服务：
+
+```text
+defaultProvider=deepseek
+defaultModel=deepseek-v4-flash
+可选高质量模型=deepseek-v4-pro
+```
+
+不在 README 或 Git 中保存 DeepSeek API key。验证命令：
+
+```bash
+ssh firecar-pi 'bash -lc "pi --list-models deepseek"'
+ssh firecar-pi 'bash -lc "pi --provider deepseek --model deepseek-v4-flash --thinking off --no-tools --no-session -p '\''reply exactly: pong'\''"'
+```
 
 ## 智能冰箱识别链路
 
@@ -363,6 +380,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
 - YOLO 图片检测测试必须在 ONNX 模型放入 `~/yolo-inference/models` 后进行。
 - 远端 Pi agent 检查：`ssh firecar-pi 'bash -lc "pi --version; piagent --version"'`，当前版本为 `0.80.3`。
+- 远端 Pi agent DeepSeek 检查：`ssh firecar-pi 'bash -lc "pi --list-models deepseek"'`，并用 `deepseek-v4-flash` 做最小 `pong` 请求。
 
 ## 禁止操作
 
@@ -481,3 +499,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 在 `firecar-pi` 用户态安装 Pi Coding Agent `@earendil-works/pi-coding-agent@0.80.3`。
   - 新增 `~/bin/pi` 与 `~/bin/piagent` 软链接，并将 `~/bin`、`~/.local/bin` 写入远端 `~/.profile` 与 `~/.bashrc`。
   - README 增补远端 Pi agent 安装位置、版本检查命令和测试规范。
+
+- `codex-vlm-inference-framework.0.8.7.202607031538`
+  - 在 `firecar-pi` 的 `~/.pi/agent/auth.json` 中配置 DeepSeek API key，文件权限固定为 `0600`，key 不写入 README 或 Git。
+  - 在 `~/.pi/agent/settings.json` 中设置 Pi agent 默认 `defaultProvider=deepseek`、`defaultModel=deepseek-v4-flash`。
+  - 远端验证 `pi --list-models deepseek` 可见 `deepseek-v4-flash`、`deepseek-v4-pro`，并通过最小 `pong` 请求确认 DeepSeek 服务可用。
