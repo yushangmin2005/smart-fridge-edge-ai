@@ -17,6 +17,7 @@
 - 公开训练数据：默认使用 Roboflow Universe `fridge-dataset/fridge-food-images/14`，手动导出的 YOLO11/YOLOv8 数据集也可放入 `data/fridge-food-images/`
 - 智能冰箱数据库：SQLite，板端默认路径为 `~/smart-fridge/data/fridge.sqlite3`
 - 智能冰箱调度：`ffmpeg` + v4l2 每 1 小时拍照一次，默认使用 `/dev/video10` UVC 摄像头
+- 智能冰箱 Web 前端：Python 标准库 `http.server` + SQLite 只读查询，默认端口 `8090`
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -74,6 +75,11 @@ scripts/remote_smart_fridge_db_check.sh firecar-pi
 ssh firecar-pi '~/smart-fridge/bin/start_pipeline.sh'
 ssh firecar-pi '~/smart-fridge/bin/status_pipeline.sh'
 ssh firecar-pi '~/smart-fridge/bin/stop_pipeline.sh'
+
+# 启动/停止/查看智能冰箱 Web 状态面板
+ssh firecar-pi '~/smart-fridge/bin/start_web.sh'
+ssh firecar-pi '~/smart-fridge/bin/status_web.sh'
+ssh firecar-pi '~/smart-fridge/bin/stop_web.sh'
 ```
 
 部署后，远程目录结构为：
@@ -111,12 +117,15 @@ YOLO 部署后，远程目录结构为：
   config/smart_fridge.env
   data/fridge.sqlite3  # SQLite 主库，默认不提交
   data/pipeline_state.json
+  logs/fridge-web.log
+  run/fridge-web.pid
   tmp/captures/        # 定时拍照临时图，最多保留 24 张
   tmp/crops/           # 新增目标裁剪图
   tmp/yolo/            # YOLO JSON 输出
   tmp/vlm/             # VLM 严格 JSON 输出
   runtime/fridge_db.py
   runtime/fridge_pipeline.py
+  runtime/fridge_web.py
   runtime/vlm_food_prompt.txt
 ```
 
@@ -158,6 +167,37 @@ SMART_FRIDGE_VLM_TIMEOUT=3600
 ```
 
 VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。
+
+## Web 状态面板
+
+板端 Web 前端由 `~/smart-fridge/bin/fridge_web.sh` 启动，默认监听 `0.0.0.0:8090`，页面每 30 秒刷新一次。它只读取现有 SQLite、`pipeline_state.json`、临时照片目录和管线日志，不主动触发 YOLO/VLM 推理。
+
+```bash
+ssh firecar-pi '~/smart-fridge/bin/start_web.sh'
+ssh firecar-pi '~/smart-fridge/bin/status_web.sh'
+```
+
+浏览器访问：
+
+```text
+http://192.168.110.190:8090/
+```
+
+页面展示内容：
+
+- 当前服务状态：pipeline、VLM、Web 进程是否运行。
+- 最新拍照画面、最近裁剪图和最近 24 张临时照片。
+- 当前库存、食物新鲜度、风险建议、置信度和 `food_id`。
+- 最近 `food.created`、`food.updated`、`food.removed` 变化事件。
+- 最近一轮识别摘要、YOLO/VLM 输出文件和管线日志 tail。
+
+可调整配置：
+
+```bash
+SMART_FRIDGE_WEB_HOST=0.0.0.0
+SMART_FRIDGE_WEB_PORT=8090
+SMART_FRIDGE_WEB_REFRESH_SECONDS=30
+```
 
 ## 数据库命令
 
@@ -395,3 +435,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 管线现在会保存 VLM 原始 HTTP 响应、模型文本和规范化 JSON，便于定位真实模型未写库时是解析失败、非食物判断还是推理超时。
   - 增加 `SMART_FRIDGE_YOLO_MOCK_JSON` 测试钩子，用于单框验证真实 VLM 到 SQLite 的闭环，不影响正式 YOLO 调用。
   - 远端单框真实 VLM 闭环验证通过：`milk` 裁剪图由 Qwen2.5-VL 输出 `food_name=牛奶`、`category=dairy`、`freshness=attention`、`confidence=0.9`，并写入临时 SQLite 的 `foods`、`food_observations`、`food_events`。
+
+- `codex-vlm-inference-framework.0.8.0.202607031429`
+  - 新增 `smart_fridge_runtime/fridge_web.py`，使用 Python 标准库提供智能冰箱 Web 状态面板和 JSON API。
+  - Web 页面展示最新拍照、最近裁剪图、当前库存、食物状态、变化事件、active objects 和管线日志。
+  - 部署脚本新增 `fridge_web.sh`、`start_web.sh`、`stop_web.sh`、`status_web.sh`，默认监听 `0.0.0.0:8090`。
+  - 配置样例新增 `SMART_FRIDGE_WEB_HOST`、`SMART_FRIDGE_WEB_PORT`、`SMART_FRIDGE_WEB_REFRESH_SECONDS`。
