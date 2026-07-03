@@ -19,6 +19,7 @@
 - 智能冰箱调度：`ffmpeg` + v4l2 每 1 小时拍照一次，默认使用 `/dev/video10` UVC 摄像头
 - 智能冰箱 Web 前端：Python 标准库 `http.server` + SQLite 只读查询，默认端口 `8090`
 - 远端维护工具：Pi Coding Agent `@earendil-works/pi-coding-agent`，用户态安装到 `firecar-pi:~/.local`
+- 板端 Pi 工具扩展：TypeScript Pi extension，将 NanoPC-T4 GPIO、I2C、串口、摄像头等外设能力注册为 Pi agent tool
 - 云端建议：每轮自动识别后将当前 active objects 发送到 DeepSeek `deepseek-v4-flash`，结构化建议写入 `pipeline_state.json`
 - 脚本语言：Bash
 
@@ -85,6 +86,12 @@ ssh firecar-pi '~/smart-fridge/bin/stop_web.sh'
 
 # 查看远端 Pi agent 版本
 ssh firecar-pi 'bash -lc "pi --version; piagent --version"'
+
+# 部署板端 GPIO/外设 Pi tools
+scripts/deploy_pi_board_tools.sh firecar-pi
+
+# 通过 Pi agent 调用板端外设清单工具做冒烟检查
+ssh firecar-pi 'bash -lc "pi --provider deepseek --model deepseek-v4-flash --thinking off --no-session --no-builtin-tools --tools board_inventory -p '\''Use board_inventory once and summarize available device groups in Chinese.'\''"'
 ```
 
 部署后，远程目录结构为：
@@ -151,6 +158,7 @@ models/               # 导出的 ONNX/classes 文件，默认不提交
 ~/bin/piagent         # 兼容命令名，指向同一 Pi CLI
 ~/.pi/agent/auth.json # Pi agent 认证文件，权限 0600，默认不提交
 ~/.pi/agent/settings.json # Pi agent 全局设置，权限 0600，默认不提交
+~/.pi/agent/extensions/firecar-board-tools.ts # 板端 GPIO/外设 tools 扩展
 ```
 
 非交互 SSH 不一定加载远端用户 PATH，检查或调用 Pi agent 时优先使用 `ssh firecar-pi 'bash -lc "pi --version"'`，或直接调用 `~/.local/bin/pi`。
@@ -168,6 +176,28 @@ defaultModel=deepseek-v4-flash
 ```bash
 ssh firecar-pi 'bash -lc "pi --list-models deepseek"'
 ssh firecar-pi 'bash -lc "pi --provider deepseek --model deepseek-v4-flash --thinking off --no-tools --no-session -p '\''reply exactly: pong'\''"'
+```
+
+板端 GPIO/外设 tools 由 `pi_extensions/firecar_board_tools.ts` 提供，部署后 Pi agent 会从全局扩展目录自动发现并注册以下工具：
+
+```text
+board_inventory       # 汇总 GPIO/I2C/SPI/串口/摄像头设备节点与可用命令
+board_gpio_info       # 查看 GPIO chip 与 line 信息；需要 libgpiod 工具
+board_gpio_read       # 读取 GPIO line；需要 gpioget 与设备权限
+board_gpio_write      # 写 GPIO line；默认禁用，需要环境变量和确认语
+board_i2c_scan        # 扫描 I2C bus；需要 i2c-tools 与设备权限
+board_i2c_read        # 读取 I2C register；需要 i2cget 与设备权限
+board_i2c_write       # 写 I2C register；默认禁用，需要环境变量和确认语
+board_camera_capture  # 用 ffmpeg 从 /dev/video10 默认摄像头抓取单帧 JPEG
+```
+
+当前 `firecar-pi` 可见 `/dev/gpiochip0..4`、`/dev/i2c-0/1/2/4/7/9/10`、`/dev/ttyS0`、`/dev/ttyS4` 和 `/dev/video*`；未发现 `/dev/spidev*`。当前缺少 `gpioinfo/gpioget/gpioset` 与 `i2cdetect/i2cget/i2cset`，且远端没有免密 sudo，因此本次只注册 tool，不强行安装系统包或修改设备权限。
+
+写硬件默认关闭。只有在确认接线、pin mapping、总线地址和外设安全后，才允许给 Pi agent 进程设置：
+
+```bash
+SMART_FRIDGE_PI_TOOLS_ALLOW_GPIO_WRITE=1
+SMART_FRIDGE_PI_TOOLS_ALLOW_I2C_WRITE=1
 ```
 
 ## 智能冰箱识别链路
@@ -387,6 +417,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - YOLO 图片检测测试必须在 ONNX 模型放入 `~/yolo-inference/models` 后进行。
 - 远端 Pi agent 检查：`ssh firecar-pi 'bash -lc "pi --version; piagent --version"'`，当前版本为 `0.80.3`。
 - 远端 Pi agent DeepSeek 检查：`ssh firecar-pi 'bash -lc "pi --list-models deepseek"'`，并用 `deepseek-v4-flash` 做最小 `pong` 请求。
+- 板端 Pi tools 检查：`scripts/deploy_pi_board_tools.sh firecar-pi`，再通过 `pi --tools board_inventory` 调用扩展工具确认 GPIO/I2C/串口/摄像头设备清单可返回。
 - 云端建议检查：使用 `SMART_FRIDGE_CLOUD_ADVICE_MOCK_JSON` 做本地/远端隔离冒烟；正式链路通过 `pipeline_state.json.cloud_advice.ok=true` 和 Web “云端建议”卡片验证。
 
 ## 禁止操作
@@ -398,6 +429,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 不提交 `config/*.env`、公开数据集、训练输出、模型文件、日志、PID 文件或私钥。
 - 不提交 SQLite 主库、WAL/SHM 附属文件或临时数据库。
 - 不删除远程用户目录中与本项目无关的文件。
+- 不在未确认接线、pin mapping、总线地址和外设安全前启用 Pi board tools 的 GPIO/I2C 写操作。
 
 ## 修改历史
 
@@ -516,3 +548,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 自动识别管线新增云端建议步骤：每轮完成 active objects 更新后调用 DeepSeek，返回综合摘要、风险等级、行动建议和单项食物建议。
   - `pipeline_state.json` 新增 `cloud_advice` 字段；Web 面板新增“云端建议”卡片展示最新云端综合判断。
   - 配置模板和部署脚本新增 `SMART_FRIDGE_CLOUD_ADVICE_*` 配置项，默认从远端 Pi agent `auth.json` 读取 DeepSeek key，不在项目配置中保存明文 key。
+
+- `codex-vlm-inference-framework.0.10.0.202607031619`
+  - 新增 `pi_extensions/firecar_board_tools.ts`，将 NanoPC-T4 GPIO、I2C、串口、摄像头等板端外设清单与操作入口注册为 Pi agent tools。
+  - 新增 `scripts/deploy_pi_board_tools.sh`，部署扩展到 `firecar-pi:~/.pi/agent/extensions/firecar-board-tools.ts` 并做 Pi CLI 加载检查。
+  - 记录当前 `firecar-pi` 已暴露的 GPIO/I2C/串口/视频设备节点，以及 `libgpiod/i2c-tools` 命令缺失、无免密 sudo 的限制。
+  - GPIO/I2C 写工具默认禁用，必须显式设置环境变量并传入确认语后才会尝试改变硬件状态。
