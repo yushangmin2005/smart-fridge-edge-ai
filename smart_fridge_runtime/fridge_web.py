@@ -439,7 +439,7 @@ INDEX_HTML = r"""<!doctype html>
     .kv span:first-child { color: var(--muted); }
     .kv span:last-child { overflow-wrap: anywhere; }
     .table-wrap { overflow-x: auto; max-width: 100%; min-width: 0; }
-    table { width: 100%; border-collapse: collapse; min-width: 680px; }
+    table { width: 100%; border-collapse: collapse; min-width: 520px; }
     th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--soft); vertical-align: top; }
     th { color: var(--muted); font-weight: 650; font-size: 12px; background: #fbfcfd; }
     tr:last-child td { border-bottom: 0; }
@@ -479,6 +479,28 @@ INDEX_HTML = r"""<!doctype html>
     }
     .thumb img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; }
     .thumb div { padding: 5px 6px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .debug-details { overflow: hidden; }
+    .debug-summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid transparent;
+    }
+    .debug-details[open] .debug-summary { border-bottom-color: var(--line); }
+    .debug-summary::-webkit-details-marker { display: none; }
+    .debug-summary::after {
+      content: "展开";
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .debug-details[open] .debug-summary::after { content: "收起"; }
+    .debug-summary strong { display: block; font-size: 15px; }
+    .debug-summary small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+    .debug-grid { display: grid; gap: 4px; margin-bottom: 12px; min-width: 0; }
     pre {
       margin: 0;
       max-height: 270px;
@@ -511,7 +533,7 @@ INDEX_HTML = r"""<!doctype html>
       .topbar { padding: 12px 10px; }
       .content { padding: 10px; }
       .thumbs { grid-template-columns: 1fr; }
-      table { min-width: 620px; }
+      table { min-width: 460px; }
     }
   </style>
 </head>
@@ -532,10 +554,10 @@ INDEX_HTML = r"""<!doctype html>
   <main>
     <div class="stack">
       <section class="grid-metrics">
-        <div class="band metric"><div class="label">当前活跃</div><div class="value" id="activeCount">-</div><div class="note">当前仍在画面中的目标</div></div>
-        <div class="band metric"><div class="label">食物记录</div><div class="value" id="foodCount">-</div><div class="note">数据库累计食物</div></div>
-        <div class="band metric"><div class="label">观察记录</div><div class="value" id="obsCount">-</div><div class="note">检测与主识别记录</div></div>
-        <div class="band metric"><div class="label">事件记录</div><div class="value" id="eventCount">-</div><div class="note">入库、更新、移除</div></div>
+        <div class="band metric"><div class="label">画面目标</div><div class="value" id="activeCount">-</div><div class="note">当前画面中识别到</div></div>
+        <div class="band metric"><div class="label">当前食物</div><div class="value" id="foodCount">-</div><div class="note">仍在库存中</div></div>
+        <div class="band metric"><div class="label">需注意</div><div class="value" id="attentionCount">-</div><div class="note">建议优先处理</div></div>
+        <div class="band metric"><div class="label">最近变化</div><div class="value" id="eventCount">-</div><div class="note">入库、更新、移除</div></div>
       </section>
 
       <section class="band">
@@ -543,22 +565,21 @@ INDEX_HTML = r"""<!doctype html>
         <div class="content split">
           <div class="photo-wrap" id="photoBox"><span class="muted">暂无照片</span></div>
           <div class="photo-meta">
-            <div class="kv"><span>摄像头</span><span id="cameraDevice">-</span></div>
-            <div class="kv"><span>最新检测</span><span id="latestDetections">-</span></div>
-            <div class="kv"><span>当前周期</span><span id="lastCycle">-</span></div>
-            <div class="kv"><span>照片数量</span><span id="captureCount">-</span></div>
-            <div class="kv"><span>VLM 超时</span><span id="vlmTimeout">-</span></div>
+            <div class="kv"><span>拍摄时间</span><span id="latestShotTime">-</span></div>
+            <div class="kv"><span>识别结果</span><span id="latestDetections">-</span></div>
+            <div class="kv"><span>运行状态</span><span id="lastCycle">-</span></div>
+            <div class="kv"><span>照片保留</span><span id="captureCount">-</span></div>
           </div>
         </div>
       </section>
 
       <section class="band">
         <div class="section-head"><h2>当前库存与状态</h2><span class="muted" id="foodSummary">-</span></div>
-        <div class="table-wrap"><table><thead><tr><th>状态</th><th>名称</th><th>新鲜度</th><th>建议</th><th>置信度</th><th>最近出现</th><th>ID</th></tr></thead><tbody id="foodsBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>食物</th><th>状态</th><th>建议</th><th>最近看到</th></tr></thead><tbody id="foodsBody"></tbody></table></div>
       </section>
 
       <section class="band">
-        <div class="section-head"><h2>识别变化</h2><span class="muted">最近事件</span></div>
+        <div class="section-head"><h2>最近变化</h2><span class="muted">入库、更新、移除</span></div>
         <div class="content"><div class="timeline" id="events"></div></div>
       </section>
     </div>
@@ -569,13 +590,21 @@ INDEX_HTML = r"""<!doctype html>
         <div class="content"><div class="thumbs" id="captures"></div></div>
       </section>
       <section class="band">
-        <div class="section-head"><h2>活跃目标</h2><span class="muted">管线状态</span></div>
+        <div class="section-head"><h2>画面中的食物</h2><span class="muted">当前可见</span></div>
         <div class="content"><div class="timeline" id="activeObjects"></div></div>
       </section>
-      <section class="band">
-        <div class="section-head"><h2>运行日志</h2><span class="muted">最近日志</span></div>
-        <div class="content"><pre id="logs">等待数据</pre></div>
-      </section>
+      <details class="band debug-details">
+        <summary class="debug-summary"><span><strong>调试信息</strong><small>服务、文件和日志</small></span></summary>
+        <div class="content">
+          <div class="debug-grid">
+            <div class="kv"><span>服务</span><span id="debugServices">-</span></div>
+            <div class="kv"><span>数据库</span><span id="debugDb">-</span></div>
+            <div class="kv"><span>文件</span><span id="debugFiles">-</span></div>
+            <div class="kv"><span>周期</span><span id="debugCycle">-</span></div>
+          </div>
+          <pre id="logs">等待数据</pre>
+        </div>
+      </details>
     </aside>
   </main>
   <script>
@@ -683,34 +712,33 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function renderFoods(data) {
-      const rows = (data.foods || []).map((food) => {
+      const visibleFoods = (data.foods || []).filter((food) => food.status_current !== "food.removed");
+      const rows = visibleFoods.map((food) => {
         const active = food.active ? "active" : (food.status_current === "food.removed" ? "removed" : "inactive");
         return `<tr>
-          <td>${badge(active)}</td>
           <td>${escapeHtml(zh(food.canonical_name))}</td>
-          <td>${badge(food.status_current || "-")}</td>
+          <td>${badge(food.status_current || active || "-")}</td>
           <td>${badge(food.advice_current || "-")}</td>
-          <td>${food.confidence_current ?? "-"}</td>
           <td>${fmtTime(food.last_seen_at)}</td>
-          <td><code>${escapeHtml(food.food_id)}</code></td>
         </tr>`;
       }).join("");
-      $("foodsBody").innerHTML = rows || `<tr><td colspan="7" class="empty">暂无库存记录</td></tr>`;
-      $("foodSummary").textContent = `${data.foods?.length || 0} 条`;
+      $("foodsBody").innerHTML = rows || `<tr><td colspan="4" class="empty">暂无库存记录</td></tr>`;
+      $("foodSummary").textContent = `${visibleFoods.length} 种`;
     }
 
     function renderEvents(data) {
       const events = (data.events || []).slice(0, 12);
       $("events").innerHTML = events.length ? events.map((event) => {
         const payload = event.payload_json || {};
+        const name = event.canonical_name || payload.food_name || "食物";
         const detail = [
           event.event_at && fmtTime(event.event_at),
-          payload.yolo_label && `预识别 ${zh(payload.yolo_label)}`,
+          payload.yolo_label && `识别到 ${zh(payload.yolo_label)}`,
           payload.status_current && `状态 ${zh(payload.status_current)}`,
         ].filter(Boolean).join(" · ");
         return `<div class="event">
-          <strong>${escapeHtml(zh(event.event_type))} · ${escapeHtml(zh(event.canonical_name || event.food_id))}</strong>
-          <p>${escapeHtml(detail || event.food_id)}</p>
+          <strong>${escapeHtml(zh(event.event_type))} · ${escapeHtml(zh(name))}</strong>
+          <p>${escapeHtml(detail || "暂无补充信息")}</p>
         </div>`;
       }).join("") : `<div class="empty">暂无变化事件</div>`;
     }
@@ -719,8 +747,9 @@ INDEX_HTML = r"""<!doctype html>
       const objects = data.active_objects || [];
       $("activeObjects").innerHTML = objects.length ? objects.map((item) => `
         <div class="event">
-          <strong>${escapeHtml(zh(item.yolo_label || "目标"))} · ${escapeHtml(item.food_id || "-")}</strong>
+          <strong>${escapeHtml(zh(item.vlm?.food_name || item.yolo_label || "食物"))}</strong>
           <p>${escapeHtml([
+            item.yolo_label ? `预识别 ${zh(item.yolo_label)}` : "",
             zh(item.vlm?.food_name),
             item.vlm?.category ? `类别 ${zh(item.vlm.category)}` : "",
             item.vlm?.freshness ? `新鲜度 ${zh(item.vlm.freshness)}` : "",
@@ -728,27 +757,58 @@ INDEX_HTML = r"""<!doctype html>
             item.vlm?.composition?.length ? `组成 ${zhList(item.vlm.composition)}` : "",
           ].filter(Boolean).join(" · "))}</p>
         </div>
-      `).join("") : `<div class="empty">当前没有活跃目标</div>`;
+      `).join("") : `<div class="empty">当前画面没有识别到食物</div>`;
+    }
+
+    function serviceText(label, service) {
+      const state = service?.running ? "运行中" : "未确认";
+      return `${label}${state}${service?.pid ? `(${service.pid})` : ""}`;
+    }
+
+    function needsAttention(food) {
+      const text = [
+        food.status_current,
+        food.advice_current,
+        food.risk_level,
+        food.visible_state,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return text.includes("attention") || text.includes("danger") || text.includes("warning") || text.includes("unknown");
+    }
+
+    function renderDebug(data, lastCycle) {
+      const counts = data.db_counts || {};
+      $("debugServices").textContent = [
+        serviceText("自动识别", data.services?.pipeline),
+        serviceText("主识别", data.services?.vlm),
+        serviceText("Web", data.services?.web),
+      ].join(" · ");
+      $("debugDb").textContent = `${data.config?.db_path || "-"} / 食物 ${counts.foods ?? 0} / 观察 ${counts.food_observations ?? 0} / 事件 ${counts.food_events ?? 0}`;
+      $("debugFiles").textContent = `YOLO ${data.yolo_files?.length || 0} 个 / VLM ${data.vlm_files?.length || 0} 个`;
+      $("debugCycle").textContent = lastCycle.captured_at
+        ? `${fmtTime(lastCycle.captured_at)} · 检测 ${lastCycle.detections ?? 0} · ${lastCycle.ok ? "正常" : "异常"}`
+        : "暂无周期记录";
+      $("logs").textContent = (data.log_tail || []).join("\n") || "暂无日志";
     }
 
     function render(data) {
-      const counts = data.db_counts || {};
       const lastCycle = data.last_cycle || {};
-      $("subtitle").textContent = `更新时间 ${fmtTime(data.generated_at)} · DB ${data.config?.db_path || "-"}`;
+      const visibleFoods = (data.foods || []).filter((food) => food.status_current !== "food.removed");
+      const attentionFoods = visibleFoods.filter(needsAttention);
+      $("subtitle").textContent = `更新时间 ${fmtTime(data.generated_at)}`;
       $("activeCount").textContent = (data.active_objects || []).length;
-      $("foodCount").textContent = counts.foods ?? 0;
-      $("obsCount").textContent = counts.food_observations ?? 0;
-      $("eventCount").textContent = counts.food_events ?? 0;
+      $("foodCount").textContent = visibleFoods.length;
+      $("attentionCount").textContent = attentionFoods.length;
+      $("eventCount").textContent = (data.events || []).length;
       $("pipelineStatus").className = `badge ${data.services?.pipeline?.running ? "ok" : "bad"}`;
-      $("pipelineStatus").textContent = data.services?.pipeline?.running ? `定时任务 ${data.services.pipeline.pid}` : "定时任务已停止";
+      $("pipelineStatus").textContent = data.services?.pipeline?.running ? "自动识别正常" : "自动识别停止";
       $("vlmStatus").className = `badge ${data.services?.vlm?.running ? "ok" : "warn"}`;
-      $("vlmStatus").textContent = data.services?.vlm?.running ? `主识别服务 ${data.services.vlm.pid}` : "主识别服务未知";
-      $("cameraDevice").textContent = data.config?.camera_device || "-";
-      $("latestDetections").textContent = `${lastCycle.detections ?? data.latest_yolo?.detections?.length ?? 0}`;
-      $("lastCycle").textContent = lastCycle.captured_at ? `${fmtTime(lastCycle.captured_at)} / ${lastCycle.ok ? "正常" : "异常"}` : "-";
-      $("captureCount").textContent = `${data.captures?.length || 0} / ${data.config?.capture_keep || 24}`;
-      $("vlmTimeout").textContent = `${data.config?.vlm_timeout_seconds || 0}s`;
+      $("vlmStatus").textContent = data.services?.vlm?.running ? "主识别正常" : "主识别等待中";
+      const detectionCount = lastCycle.detections ?? data.latest_yolo?.detections?.length ?? 0;
+      $("latestDetections").textContent = detectionCount ? `发现 ${detectionCount} 个目标` : "暂未发现食物";
+      $("lastCycle").textContent = lastCycle.captured_at ? (lastCycle.ok ? "最近一轮正常" : "最近一轮异常") : "等待第一次识别";
+      $("captureCount").textContent = `${data.captures?.length || 0} 张`;
       $("captureTime").textContent = data.latest_capture ? fmtTime(data.latest_capture.modified_at) : "-";
+      $("latestShotTime").textContent = data.latest_capture ? fmtTime(data.latest_capture.modified_at) : "-";
       if (data.latest_capture) {
         $("photoBox").innerHTML = `<img src="${media(data.latest_capture)}" alt="latest capture">`;
       } else {
@@ -758,7 +818,7 @@ INDEX_HTML = r"""<!doctype html>
       renderEvents(data);
       renderActiveObjects(data);
       renderThumbs("captures", data.captures || []);
-      $("logs").textContent = (data.log_tail || []).join("\n") || "暂无日志";
+      renderDebug(data, lastCycle);
     }
 
     let refreshTimer = null;
@@ -824,6 +884,9 @@ class SmartFridgeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self.send_bytes(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if parsed.path == "/favicon.ico":
+            self.send_bytes(204, b"", "image/x-icon")
             return
         if parsed.path == "/api/overview":
             self.send_json(self.store.overview())
