@@ -568,6 +568,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="kv"><span>拍摄时间</span><span id="latestShotTime">-</span></div>
             <div class="kv"><span>识别结果</span><span id="latestDetections">-</span></div>
             <div class="kv"><span>运行状态</span><span id="lastCycle">-</span></div>
+            <div class="kv"><span>下次识别</span><span id="nextRecognition">-</span></div>
             <div class="kv"><span>照片保留</span><span id="captureCount">-</span></div>
           </div>
         </div>
@@ -775,6 +776,24 @@ INDEX_HTML = r"""<!doctype html>
       return text.includes("attention") || text.includes("danger") || text.includes("warning") || text.includes("unknown");
     }
 
+    function addSeconds(value, seconds) {
+      if (!value || !seconds || seconds <= 0) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      return new Date(date.getTime() + seconds * 1000).toISOString();
+    }
+
+    function nextRecognitionTime(data, lastCycle) {
+      if (!data.services?.pipeline?.running) return "自动识别已停止";
+      const interval = Number(data.config?.capture_interval_seconds || 0);
+      const fallback = addSeconds(lastCycle.captured_at, interval);
+      const nextAt = lastCycle.next_scheduled_at || addSeconds(lastCycle.completed_at, interval) || fallback;
+      if (!nextAt) return "等待第一次识别";
+      const nextDate = new Date(nextAt);
+      if (Number.isNaN(nextDate.getTime())) return "等待第一次识别";
+      return nextDate.getTime() < Date.now() ? `${fmtTime(nextAt)}（等待下一轮）` : fmtTime(nextAt);
+    }
+
     function renderDebug(data, lastCycle) {
       const counts = data.db_counts || {};
       $("debugServices").textContent = [
@@ -806,6 +825,7 @@ INDEX_HTML = r"""<!doctype html>
       const detectionCount = lastCycle.detections ?? data.latest_yolo?.detections?.length ?? 0;
       $("latestDetections").textContent = detectionCount ? `发现 ${detectionCount} 个目标` : "暂未发现食物";
       $("lastCycle").textContent = lastCycle.captured_at ? (lastCycle.ok ? "最近一轮正常" : "最近一轮异常") : "等待第一次识别";
+      $("nextRecognition").textContent = nextRecognitionTime(data, lastCycle);
       $("captureCount").textContent = `${data.captures?.length || 0} 张`;
       $("captureTime").textContent = data.latest_capture ? fmtTime(data.latest_capture.modified_at) : "-";
       $("latestShotTime").textContent = data.latest_capture ? fmtTime(data.latest_capture.modified_at) : "-";

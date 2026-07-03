@@ -170,7 +170,7 @@ VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出
 
 ## Web 状态面板
 
-板端 Web 前端由 `~/smart-fridge/bin/fridge_web.sh` 启动，默认监听 `0.0.0.0:8090`，页面每 30 秒刷新一次。它只读取现有 SQLite、`pipeline_state.json`、临时照片目录和管线日志，不主动触发 YOLO/VLM 推理。默认视图聚焦运行是否正常、最新画面、当前库存、需注意食物、最近变化和近期照片；服务 PID、数据库路径、YOLO/VLM 输出文件和日志收进“调试信息”折叠区。页面展示层会把常见状态、事件类型、风险等级和 YOLO 食材类别汉化；JSON API 保留数据库中的原始字段值，方便调试。
+板端 Web 前端由 `~/smart-fridge/bin/fridge_web.sh` 启动，默认监听 `0.0.0.0:8090`，页面每 30 秒刷新一次。它只读取现有 SQLite、`pipeline_state.json`、临时照片目录和管线日志，不主动触发 YOLO/VLM 推理。默认视图聚焦运行是否正常、最新画面、下次识别时间、当前库存、需注意食物、最近变化和近期照片；服务 PID、数据库路径、YOLO/VLM 输出文件和日志收进“调试信息”折叠区。页面展示层会把常见状态、事件类型、风险等级和 YOLO 食材类别汉化；JSON API 保留数据库中的原始字段值，方便调试。
 
 ```bash
 ssh firecar-pi '~/smart-fridge/bin/start_web.sh'
@@ -186,7 +186,7 @@ http://192.168.110.190:8090/
 页面展示内容：
 
 - 自动识别和主识别服务是否可用，默认不展示 PID。
-- 最新拍照画面和最近 24 张临时照片。
+- 最新拍照画面、下次识别时间和最近 24 张临时照片。
 - 当前库存、需注意数量、食物新鲜度和风险建议。
 - 最近入库、更新、移除变化事件。
 - 折叠调试信息：数据库路径、服务 PID、YOLO/VLM 输出文件和管线日志 tail。
@@ -457,3 +457,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 简化 Web 状态面板默认视图，去掉主界面中的 PID、数据库路径、VLM 超时、置信度、`food_id` 和日志等技术字段。
   - 新增“调试信息”折叠区，保留服务、数据库、YOLO/VLM 文件和日志信息，供排查问题时展开查看。
   - Web 服务对浏览器自动请求的 `/favicon.ico` 返回空响应，避免控制台出现无关 404。
+
+- `codex-vlm-inference-framework.0.8.5.202607031506`
+  - Web 面板新增“下次识别”时间，优先使用管线摘要中的 `next_scheduled_at`，旧日志回退为上一轮识别时间加识别间隔。
+  - 自动识别管线摘要新增 `completed_at` 和 `next_scheduled_at` 字段，便于前端展示下一轮计划时间。

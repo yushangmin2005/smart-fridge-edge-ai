@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -25,6 +25,10 @@ visible_state, storage_advice, risk_level, confidence, notes."""
 
 def utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def utc_iso(dt):
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def env(name, default=None):
@@ -751,9 +755,13 @@ def run_once(args):
     }
     write_json(state_path, state)
 
+    completed_at = datetime.now(timezone.utc).replace(microsecond=0)
+    interval = env_int("SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS", 3600)
     summary = {
         "ok": not any(not item.get("fallback", True) for item in errors),
         "captured_at": now,
+        "completed_at": utc_iso(completed_at),
+        "next_scheduled_at": utc_iso(completed_at + timedelta(seconds=interval)),
         "camera_device": camera_device,
         "image_ref": image_path,
         "yolo_json": str(paths["yolo_json"]),
