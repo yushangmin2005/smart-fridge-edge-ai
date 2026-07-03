@@ -503,8 +503,8 @@ INDEX_HTML = r"""<!doctype html>
         <div class="subline" id="subtitle">等待数据</div>
       </div>
       <div class="actions">
-        <span class="badge off" id="pipelineStatus">pipeline</span>
-        <span class="badge off" id="vlmStatus">vlm</span>
+        <span class="badge off" id="pipelineStatus">定时任务</span>
+        <span class="badge off" id="vlmStatus">主识别服务</span>
         <button id="refreshBtn" type="button">刷新</button>
       </div>
     </div>
@@ -512,10 +512,10 @@ INDEX_HTML = r"""<!doctype html>
   <main>
     <div class="stack">
       <section class="grid-metrics">
-        <div class="band metric"><div class="label">当前活跃</div><div class="value" id="activeCount">-</div><div class="note">state active objects</div></div>
-        <div class="band metric"><div class="label">食物记录</div><div class="value" id="foodCount">-</div><div class="note">SQLite foods</div></div>
-        <div class="band metric"><div class="label">观察记录</div><div class="value" id="obsCount">-</div><div class="note">YOLO/VLM observations</div></div>
-        <div class="band metric"><div class="label">事件记录</div><div class="value" id="eventCount">-</div><div class="note">created / removed</div></div>
+        <div class="band metric"><div class="label">当前活跃</div><div class="value" id="activeCount">-</div><div class="note">当前仍在画面中的目标</div></div>
+        <div class="band metric"><div class="label">食物记录</div><div class="value" id="foodCount">-</div><div class="note">数据库累计食物</div></div>
+        <div class="band metric"><div class="label">观察记录</div><div class="value" id="obsCount">-</div><div class="note">检测与主识别记录</div></div>
+        <div class="band metric"><div class="label">事件记录</div><div class="value" id="eventCount">-</div><div class="note">入库、更新、移除</div></div>
       </section>
 
       <section class="band">
@@ -553,11 +553,11 @@ INDEX_HTML = r"""<!doctype html>
         <div class="content"><div class="thumbs" id="captures"></div></div>
       </section>
       <section class="band">
-        <div class="section-head"><h2>活跃目标</h2><span class="muted">pipeline state</span></div>
+        <div class="section-head"><h2>活跃目标</h2><span class="muted">管线状态</span></div>
         <div class="content"><div class="timeline" id="activeObjects"></div></div>
       </section>
       <section class="band">
-        <div class="section-head"><h2>运行日志</h2><span class="muted">tail</span></div>
+        <div class="section-head"><h2>运行日志</h2><span class="muted">最近日志</span></div>
         <div class="content"><pre id="logs">等待数据</pre></div>
       </section>
     </aside>
@@ -565,15 +565,85 @@ INDEX_HTML = r"""<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
     const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
-    const fmtTime = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
+    const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    });
+    const fmtTime = (value) => value ? dateFormatter.format(new Date(value)) : "-";
+    const zhMap = new Map(Object.entries({
+      "active": "在库",
+      "inactive": "历史",
+      "removed": "已移除",
+      "running": "运行中",
+      "stopped": "已停止",
+      "unknown": "未知",
+      "normal": "正常",
+      "attention": "需注意",
+      "danger": "危险",
+      "closed": "已结束",
+      "ok": "正常",
+      "error": "异常",
+      "food.created": "新入库",
+      "food.updated": "状态更新",
+      "food.removed": "已移除",
+      "vegetable": "蔬菜",
+      "fruit": "水果",
+      "meat": "肉类",
+      "seafood": "海鲜",
+      "dairy": "乳制品",
+      "drink": "饮品",
+      "packaged_food": "包装食品",
+      "leftover": "剩菜",
+      "condiment": "调味品",
+      "other": "其他",
+      "apple": "苹果",
+      "banana": "香蕉",
+      "blue berry": "蓝莓",
+      "bread": "面包",
+      "brinjal": "茄子",
+      "butter": "黄油",
+      "cabbage": "卷心菜",
+      "capsicum": "甜椒",
+      "carrot": "胡萝卜",
+      "cheese": "奶酪",
+      "chicken": "鸡肉",
+      "chocolate": "巧克力",
+      "corn": "玉米",
+      "cucumber": "黄瓜",
+      "egg": "鸡蛋",
+      "flour": "面粉",
+      "fresh cream": "鲜奶油",
+      "ginger": "姜",
+      "green beans": "四季豆",
+      "green chilly": "青辣椒",
+      "green leaves": "绿叶菜",
+      "lemon": "柠檬",
+      "milk": "牛奶",
+      "mushroom": "蘑菇",
+      "potato": "土豆",
+      "shrimp": "虾",
+      "stawberry": "草莓",
+      "strawberry": "草莓",
+      "sweet potato": "红薯",
+      "tomato": "番茄",
+      "refrigerate": "冷藏",
+      "cracked": "破裂",
+    }));
+    const zh = (value) => {
+      if (value === null || value === undefined || value === "") return "-";
+      const raw = String(value);
+      return zhMap.get(raw.toLowerCase()) || raw;
+    };
+    const zhList = (items) => Array.isArray(items) ? items.map(zh).join("、") : zh(items);
     const badgeClass = (value) => {
       const text = String(value || "").toLowerCase();
-      if (text.includes("danger") || text.includes("removed") || text.includes("失败")) return "bad";
-      if (text.includes("attention") || text.includes("warning") || text.includes("unknown")) return "warn";
-      if (text.includes("normal") || text.includes("running") || text === "ok") return "ok";
+      if (text.includes("danger") || text.includes("removed") || text.includes("失败") || text.includes("危险") || text.includes("移除")) return "bad";
+      if (text.includes("attention") || text.includes("warning") || text.includes("unknown") || text.includes("注意") || text.includes("未知")) return "warn";
+      if (text.includes("normal") || text.includes("running") || text === "ok" || text.includes("正常") || text.includes("在库") || text.includes("运行")) return "ok";
       return "info";
     };
-    const badge = (text) => `<span class="badge ${badgeClass(text)}">${escapeHtml(text || "-")}</span>`;
+    const badge = (text) => `<span class="badge ${badgeClass(text)}">${escapeHtml(zh(text))}</span>`;
     const media = (item) => item && item.url ? item.url : "";
 
     async function loadData() {
@@ -601,7 +671,7 @@ INDEX_HTML = r"""<!doctype html>
         const active = food.active ? "active" : (food.status_current === "food.removed" ? "removed" : "inactive");
         return `<tr>
           <td>${badge(active)}</td>
-          <td>${escapeHtml(food.canonical_name)}</td>
+          <td>${escapeHtml(zh(food.canonical_name))}</td>
           <td>${badge(food.status_current || "-")}</td>
           <td>${badge(food.advice_current || "-")}</td>
           <td>${food.confidence_current ?? "-"}</td>
@@ -619,11 +689,11 @@ INDEX_HTML = r"""<!doctype html>
         const payload = event.payload_json || {};
         const detail = [
           event.event_at && fmtTime(event.event_at),
-          payload.yolo_label && `YOLO ${payload.yolo_label}`,
-          payload.status_current && `状态 ${payload.status_current}`,
+          payload.yolo_label && `预识别 ${zh(payload.yolo_label)}`,
+          payload.status_current && `状态 ${zh(payload.status_current)}`,
         ].filter(Boolean).join(" · ");
         return `<div class="event">
-          <strong>${escapeHtml(event.event_type)} · ${escapeHtml(event.canonical_name || event.food_id)}</strong>
+          <strong>${escapeHtml(zh(event.event_type))} · ${escapeHtml(zh(event.canonical_name || event.food_id))}</strong>
           <p>${escapeHtml(detail || event.food_id)}</p>
         </div>`;
       }).join("") : `<div class="empty">暂无变化事件</div>`;
@@ -633,10 +703,16 @@ INDEX_HTML = r"""<!doctype html>
       const objects = data.active_objects || [];
       $("activeObjects").innerHTML = objects.length ? objects.map((item) => `
         <div class="event">
-          <strong>${escapeHtml(item.yolo_label || "object")} · ${escapeHtml(item.food_id || "-")}</strong>
-          <p>${escapeHtml(item.vlm?.food_name || "")} ${escapeHtml(item.vlm?.freshness || "")} ${escapeHtml(item.vlm?.risk_level || "")}</p>
+          <strong>${escapeHtml(zh(item.yolo_label || "目标"))} · ${escapeHtml(item.food_id || "-")}</strong>
+          <p>${escapeHtml([
+            zh(item.vlm?.food_name),
+            item.vlm?.category ? `类别 ${zh(item.vlm.category)}` : "",
+            item.vlm?.freshness ? `新鲜度 ${zh(item.vlm.freshness)}` : "",
+            item.vlm?.risk_level ? `风险 ${zh(item.vlm.risk_level)}` : "",
+            item.vlm?.composition?.length ? `组成 ${zhList(item.vlm.composition)}` : "",
+          ].filter(Boolean).join(" · "))}</p>
         </div>
-      `).join("") : `<div class="empty">当前没有 active object</div>`;
+      `).join("") : `<div class="empty">当前没有活跃目标</div>`;
     }
 
     function render(data) {
@@ -648,12 +724,12 @@ INDEX_HTML = r"""<!doctype html>
       $("obsCount").textContent = counts.food_observations ?? 0;
       $("eventCount").textContent = counts.food_events ?? 0;
       $("pipelineStatus").className = `badge ${data.services?.pipeline?.running ? "ok" : "bad"}`;
-      $("pipelineStatus").textContent = data.services?.pipeline?.running ? `pipeline ${data.services.pipeline.pid}` : "pipeline stopped";
+      $("pipelineStatus").textContent = data.services?.pipeline?.running ? `定时任务 ${data.services.pipeline.pid}` : "定时任务已停止";
       $("vlmStatus").className = `badge ${data.services?.vlm?.running ? "ok" : "warn"}`;
-      $("vlmStatus").textContent = data.services?.vlm?.running ? `vlm ${data.services.vlm.pid}` : "vlm unknown";
+      $("vlmStatus").textContent = data.services?.vlm?.running ? `主识别服务 ${data.services.vlm.pid}` : "主识别服务未知";
       $("cameraDevice").textContent = data.config?.camera_device || "-";
       $("latestDetections").textContent = `${lastCycle.detections ?? data.latest_yolo?.detections?.length ?? 0}`;
-      $("lastCycle").textContent = lastCycle.captured_at ? `${fmtTime(lastCycle.captured_at)} / ${lastCycle.ok ? "ok" : "error"}` : "-";
+      $("lastCycle").textContent = lastCycle.captured_at ? `${fmtTime(lastCycle.captured_at)} / ${lastCycle.ok ? "正常" : "异常"}` : "-";
       $("captureCount").textContent = `${data.captures?.length || 0} / ${data.config?.capture_keep || 24}`;
       $("vlmTimeout").textContent = `${data.config?.vlm_timeout_seconds || 0}s`;
       $("captureTime").textContent = data.latest_capture ? fmtTime(data.latest_capture.modified_at) : "-";

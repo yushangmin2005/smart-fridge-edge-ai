@@ -170,7 +170,7 @@ VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出
 
 ## Web 状态面板
 
-板端 Web 前端由 `~/smart-fridge/bin/fridge_web.sh` 启动，默认监听 `0.0.0.0:8090`，页面每 30 秒刷新一次。它只读取现有 SQLite、`pipeline_state.json`、临时照片目录和管线日志，不主动触发 YOLO/VLM 推理。
+板端 Web 前端由 `~/smart-fridge/bin/fridge_web.sh` 启动，默认监听 `0.0.0.0:8090`，页面每 30 秒刷新一次。它只读取现有 SQLite、`pipeline_state.json`、临时照片目录和管线日志，不主动触发 YOLO/VLM 推理。页面展示层会把常见状态、事件类型、风险等级和 YOLO 食材类别汉化；JSON API 保留数据库中的原始字段值，方便调试。
 
 ```bash
 ssh firecar-pi '~/smart-fridge/bin/start_web.sh'
@@ -441,3 +441,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - Web 页面展示最新拍照、最近裁剪图、当前库存、食物状态、变化事件、active objects 和管线日志。
   - 部署脚本新增 `fridge_web.sh`、`start_web.sh`、`stop_web.sh`、`status_web.sh`，默认监听 `0.0.0.0:8090`。
   - 配置样例新增 `SMART_FRIDGE_WEB_HOST`、`SMART_FRIDGE_WEB_PORT`、`SMART_FRIDGE_WEB_REFRESH_SECONDS`。
+
+- `codex-vlm-inference-framework.0.8.1.202607031443`
+  - Web 前端增加展示层汉化映射，不改变 SQLite 和 JSON API 的原始字段值。
+  - 将页面中的运行状态、库存状态、新鲜度、风险等级、变化事件和常见 YOLO 食材类别显示为中文。
