@@ -289,7 +289,22 @@ def run_yolo(image_path, output_json_path):
     command = yolo_bin + ["--image", image_path, "--output-json", output_json_path]
     run_command(command, timeout=env_int("SMART_FRIDGE_YOLO_TIMEOUT", 300))
     payload = read_json(output_json_path, {})
-    detections = payload.get("detections") or []
+    raw_detections = payload.get("detections") or []
+    min_confidence = env_float("SMART_FRIDGE_YOLO_MIN_CONFIDENCE", 0.0)
+    detections = []
+    for detection in raw_detections:
+        try:
+            confidence = float(detection.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence >= min_confidence:
+            detections.append(detection)
+    if len(detections) != len(raw_detections):
+        payload["raw_detections"] = raw_detections
+        payload["detections"] = detections
+        payload["pipeline_min_confidence"] = min_confidence
+        payload["pipeline_filtered_count"] = len(raw_detections) - len(detections)
+        write_json(output_json_path, payload)
     return payload, detections
 
 
@@ -932,11 +947,13 @@ def run_once(args):
         "last_image_ref": image_path,
         "last_yolo_json": str(paths["yolo_json"]),
         "active_objects": current_objects,
+        "last_cycle": summary,
     }
     write_json(state_path, state)
     cloud_advice = request_cloud_advice(current_objects, summary)
     summary["cloud_advice"] = cloud_advice
     state["cloud_advice"] = cloud_advice
+    state["last_cycle"] = summary
     write_json(state_path, state)
     return summary
 

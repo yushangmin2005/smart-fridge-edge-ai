@@ -256,6 +256,9 @@ class SmartFridgeStore:
         yolo_files = list_files(self.yolo_dir, ["*.json"], DEFAULT_LIMIT)
         log_tail = read_tail(self.pipeline_log, 120)
         state = self.state()
+        last_cycle = state.get("last_cycle")
+        if not isinstance(last_cycle, dict):
+            last_cycle = parse_last_cycle(log_tail)
         latest_capture = captures[0] if captures else None
         latest_yolo = self.latest_yolo_payload()
         active_objects = state.get("active_objects") or []
@@ -294,7 +297,7 @@ class SmartFridgeStore:
             "yolo_files": yolo_files,
             "vlm_files": vlm_files,
             "latest_yolo": latest_yolo,
-            "last_cycle": parse_last_cycle(log_tail),
+            "last_cycle": last_cycle,
             "log_tail": log_tail[-80:],
         }
 

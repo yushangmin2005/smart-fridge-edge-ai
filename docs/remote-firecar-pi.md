@@ -15,6 +15,7 @@
 - Python：3.8.10
 - sudo：存在，但无免密 sudo
 - OpenSSL：系统版本为 1.1.1f，无 `libssl.so.3/libcrypto.so.3`
+- 时间同步：当前局域网 UDP NTP 超时，已改用 `smart-fridge-http-time-sync.timer` 通过 HTTPS Date 兜底校时
 
 ## 结论
 

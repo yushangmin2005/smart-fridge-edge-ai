@@ -26,6 +26,7 @@
 - 板端 Pi 工具扩展：TypeScript Pi extension，将 NanoPC-T4 GPIO、I2C、串口、摄像头等外设能力注册为 Pi agent tool
 - 板端 GPIO/I2C 系统工具：`gpiod`、`libgpiod-dev`、`i2c-tools`，配合 `gpio/i2c` 用户组和 udev 规则开放非 root 访问
 - 云端建议：每轮自动识别后将当前 active objects 发送到 DeepSeek `deepseek-v4-flash`，结构化建议写入 `pipeline_state.json`
+- 板端时间同步：`systemd-timesyncd` 固定 IP NTP 源 + `smart-fridge-http-time-sync.timer` HTTPS Date 兜底校时
 - 脚本语言：Bash
 
 ## 构建与部署命令
@@ -78,6 +79,9 @@ scripts/deploy_smart_fridge_db.sh firecar-pi
 
 # 安装 GPIO/I2C 系统工具和设备权限规则；需要远端 sudo
 scripts/install_remote_board_system_deps.sh firecar-pi
+
+# 安装板端时间同步兜底服务；需要远端 sudo
+scripts/install_remote_time_sync.sh firecar-pi
 
 # 检查远程 SQLite schema 与完整性
 scripts/remote_smart_fridge_db_check.sh firecar-pi
@@ -258,6 +262,7 @@ SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS=3600
 SMART_FRIDGE_CAPTURE_KEEP=24
 SMART_FRIDGE_CAMERA_DEVICE=/dev/video10
 SMART_FRIDGE_YOLO_BIN=/home/pi/yolo-inference/bin/yolo_detect.sh
+SMART_FRIDGE_YOLO_MIN_CONFIDENCE=0.65
 SMART_FRIDGE_VLM_URL=http://127.0.0.1:8080/v1/chat/completions
 SMART_FRIDGE_VLM_TIMEOUT=3600
 SMART_FRIDGE_CLOUD_ADVICE_ENABLED=1
@@ -469,7 +474,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 板端 Pi tools 检查：`scripts/deploy_pi_board_tools.sh firecar-pi`，再通过 `pi --tools board_inventory` 调用扩展工具确认 GPIO/I2C/串口/摄像头设备清单可返回。
 - 板端 GPIO/I2C 检查：`scripts/install_remote_board_system_deps.sh firecar-pi` 后，`gpioinfo` 与 `i2cdetect -l` 应能以 `pi` 用户运行。
 - 云端建议检查：使用 `SMART_FRIDGE_CLOUD_ADVICE_MOCK_JSON` 做本地/远端隔离冒烟；正式链路通过 `pipeline_state.json.cloud_advice.ok=true` 和 Web “云端建议”卡片验证。
-- 时间同步检查：`ssh firecar-pi 'timedatectl'`；当前发现 `System clock synchronized: no`，会导致 Web 中“下次识别时间”和照片年龄显示不准，需要单独修复 NTP/RTC。
+- 时间同步检查：`ssh firecar-pi 'timedatectl; cat /var/lib/smart-fridge/time-sync-state'`；当前网络下 UDP NTP 会超时，因此用 `smart-fridge-http-time-sync.timer` 每 30 分钟通过 HTTPS Date 兜底校准系统时间和 RTC。
 
 ## 禁止操作
 
@@ -619,3 +624,13 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 更新当前 `firecar-pi` 连接地址为 `192.168.1.115`，本机 `~/.ssh/config` 已同步并验证 `ssh firecar-pi` 可登录 `NanoPC-T4`。
   - Web 状态面板访问地址更新为 `http://192.168.1.115:8090/`，`/api/overview` 已验证可访问。
   - 记录远端 `timedatectl` 当前未完成系统时间同步，避免误判照片年龄和下次识别时间。
+
+- `codex-vlm-inference-framework.0.11.2.202607061045`
+  - 新增 `scripts/install_remote_time_sync.sh`，为 `firecar-pi` 安装时间同步修复：固定 IP NTP 配置、HTTPS Date 兜底脚本和 systemd timer。
+  - 远端时区改为 `Asia/Shanghai`，系统时间与 RTC 已校准到当前时间。
+  - 记录当前局域网 UDP NTP 超时，正式可用状态以 `/var/lib/smart-fridge/time-sync-state` 和 timer 状态为准。
+
+- `codex-vlm-inference-framework.0.11.3.202607061052`
+  - `pipeline_state.json` 新增 `last_cycle` 字段，保存最近一轮拍照、YOLO、云端建议和下次识别时间摘要。
+  - Web 状态面板优先读取 `pipeline_state.json.last_cycle`，旧日志解析仅作为兼容回退，避免 systemd journal 与文件日志不同步导致“下次识别”显示旧时间。
+  - 新增 `SMART_FRIDGE_YOLO_MIN_CONFIDENCE=0.65` 管线阈值，过滤当前天花板画面中 0.516 置信度的低置信误检，避免误触发 1 小时 VLM 分析。
