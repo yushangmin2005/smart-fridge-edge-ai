@@ -2,6 +2,8 @@
 
 当前目标是在远程 `firecar-pi` 上部署可替换模型的边缘推理运行时。该设备实际为 NanoPC-T4，Ubuntu 20.04 ARM64，约 3.7 GiB 内存，无 NVIDIA GPU/CUDA/Docker，因此 VLM 默认采用 CPU-only 的 `llama.cpp` 多模态推理路线，YOLO 采用 ONNX Runtime CPU 推理路线。已额外尝试 Mali-T860 OpenCL runtime，但当前 `llama.cpp` OpenCL 后端会将 `Mali-T860` 判定为 unsupported，不能作为默认方案。
 
+当前本机 SSH alias `firecar-pi` 指向 `pi@192.168.1.115`，已用现有 SSH key 验证可登录 `NanoPC-T4`；浏览器访问智能冰箱 Web 面板使用 `http://192.168.1.115:8090/`。
+
 ## 技术栈
 
 - 运行时：`llama.cpp` Ubuntu ARM64 CPU 包；若系统库不兼容，则自动回退到同版本源码编译
@@ -281,7 +283,7 @@ ssh firecar-pi '~/smart-fridge/bin/status_web.sh'
 浏览器访问：
 
 ```text
-http://192.168.110.190:8090/
+http://192.168.1.115:8090/
 ```
 
 页面展示内容：
@@ -450,6 +452,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 本地训练冒烟：`YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh`，需先准备公开数据集。
 - 本地导出检查：`scripts/export_yolo11n_onnx_local.sh`，需先完成训练并产生 `best.pt`。
 - 远程硬件检查：`scripts/remote_probe.sh firecar-pi`
+- 远程连接检查：`ssh firecar-pi 'hostname; whoami; ip -4 addr show wlan0'`，当前 `firecar-pi` 指向 `192.168.1.115`，登录用户为 `pi`，主机名为 `NanoPC-T4`。
 - 远程运行时检查：`scripts/remote_runtime_check.sh firecar-pi`
 - OpenCL 实验检查：`scripts/deploy_llamacpp_opencl.sh firecar-pi`，默认输出 `opencl_runtime=...` 和 `activated=0`；当前 `llama-server --list-devices` 输出 `unsupported GPU 'Mali-T860'` 与空设备列表，不能切换为默认运行时。
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
@@ -466,6 +469,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 板端 Pi tools 检查：`scripts/deploy_pi_board_tools.sh firecar-pi`，再通过 `pi --tools board_inventory` 调用扩展工具确认 GPIO/I2C/串口/摄像头设备清单可返回。
 - 板端 GPIO/I2C 检查：`scripts/install_remote_board_system_deps.sh firecar-pi` 后，`gpioinfo` 与 `i2cdetect -l` 应能以 `pi` 用户运行。
 - 云端建议检查：使用 `SMART_FRIDGE_CLOUD_ADVICE_MOCK_JSON` 做本地/远端隔离冒烟；正式链路通过 `pipeline_state.json.cloud_advice.ok=true` 和 Web “云端建议”卡片验证。
+- 时间同步检查：`ssh firecar-pi 'timedatectl'`；当前发现 `System clock synchronized: no`，会导致 Web 中“下次识别时间”和照片年龄显示不准，需要单独修复 NTP/RTC。
 
 ## 禁止操作
 
@@ -610,3 +614,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 新增 `scripts/install_remote_board_system_deps.sh`，安装 `gpiod/libgpiod-dev/i2c-tools`，配置 `gpio/i2c` 组和 udev 权限规则。
   - `fridge_db.py` 新增 `reset --yes`，用于清空测试库存数据但保留 SQLite schema。
   - 远端已备份并清空测试库，当前 `foods=0`、`food_observations=0`、`food_events=0`，维护检查 `alert_count=0`。
+
+- `codex-vlm-inference-framework.0.11.1.202607061039`
+  - 更新当前 `firecar-pi` 连接地址为 `192.168.1.115`，本机 `~/.ssh/config` 已同步并验证 `ssh firecar-pi` 可登录 `NanoPC-T4`。
+  - Web 状态面板访问地址更新为 `http://192.168.1.115:8090/`，`/api/overview` 已验证可访问。
+  - 记录远端 `timedatectl` 当前未完成系统时间同步，避免误判照片年龄和下次识别时间。

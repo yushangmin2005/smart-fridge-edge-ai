@@ -3,6 +3,7 @@
 ## 探测结果
 
 - SSH alias：`firecar-pi`
+- 当前局域网 IP：`192.168.1.115`（`wlan0`，DHCP）
 - 主机名：`NanoPC-T4`
 - 系统：Ubuntu 20.04.6 LTS
 - 架构：`aarch64`
