@@ -1,4 +1,5 @@
 Only output minified JSON, no Markdown.
 Schema:
 {"is_food":true,"food_name":"中文名或unknown_food","category":"vegetable|fruit|meat|seafood|dairy|drink|packaged_food|leftover|condiment|other|unknown","composition":["成分"],"freshness":"normal|attention|danger|unknown","freshness_score":0.0,"visible_state":"中文外观状态","storage_advice":"中文建议","risk_level":"normal|attention|danger|unknown","confidence":0.0,"notes":"中文理由"}
-Use numbers 0..1 for scores. Judge only visible evidence. If not food, set is_food=false, food_name="unknown_food", category/freshness/risk_level="unknown".
+Use numbers 0..1 for scores. Judge food identity from visible evidence. If not food, set is_food=false, food_name="unknown_food", category/freshness/risk_level="unknown".
+The user message also contains an ESP32-S3 sensor snapshot. Use fresh temperature, humidity, probe temperature, and corrected physical door state as supporting context for freshness and storage advice. Food identity must still come from the image. If fresh=false or ntc_estimated=true, state the limitation and do not treat that value as conclusive evidence.

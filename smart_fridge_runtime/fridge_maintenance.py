@@ -11,6 +11,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from fridge_sensor import read_sensor_state
+
 
 def utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -165,6 +167,7 @@ def cleanup(args):
     for log_path in (
         log_dir / "fridge-pipeline.log",
         log_dir / "fridge-web.log",
+        log_dir / "fridge-sensor.log",
         log_dir / "fridge-alerts.log",
         Path.home() / "vlm-inference" / "logs" / "vlm-server.log",
     ):
@@ -251,6 +254,7 @@ def monitor(args):
         "pipeline": env("SMART_FRIDGE_PIPELINE_PID", str(root / "run" / "fridge-pipeline.pid")),
         "web": env("SMART_FRIDGE_WEB_PID", str(root / "run" / "fridge-web.pid")),
         "vlm": env("SMART_FRIDGE_VLM_PID", str(Path.home() / "vlm-inference" / "run" / "vlm.pid")),
+        "sensor": env("SMART_FRIDGE_SENSOR_PID", str(root / "run" / "fridge-sensor.pid")),
     }
     checks["services"] = {name: pid_running(path) for name, path in pid_files.items()}
     for name, status in checks["services"].items():
@@ -268,6 +272,25 @@ def monitor(args):
         add_alert(alerts, "warning", "capture_missing", "还没有拍照结果", "未找到最近照片")
     elif capture_age is not None and capture_age > stale_minutes:
         add_alert(alerts, "warning", "capture_stale", "自动识别可能停滞", "最近照片已经 {0:.1f} 分钟未更新".format(capture_age), checks["latest_capture"])
+
+    sensor_state_path = env("SMART_FRIDGE_SENSOR_STATE_PATH", str(root / "data" / "sensor_state.json"))
+    checks["sensor"] = read_sensor_state(
+        sensor_state_path,
+        env_int("SMART_FRIDGE_SENSOR_STALE_SECONDS", 10),
+    )
+    if not checks["sensor"].get("available"):
+        add_alert(alerts, "warning", "sensor_missing", "环境数据尚未接入", "没有收到 ESP32-S3 传感器数据", checks["sensor"])
+    elif not checks["sensor"].get("fresh"):
+        add_alert(
+            alerts,
+            "warning",
+            "sensor_stale",
+            "环境数据已经中断",
+            "最近传感器数据距今 {0} 秒".format(checks["sensor"].get("age_seconds")),
+            checks["sensor"],
+        )
+    elif not checks["sensor"].get("ok"):
+        add_alert(alerts, "warning", "sensor_health", "部分环境传感器异常", "请检查温湿度、温度探头和门磁", checks["sensor"])
 
     db_path = env("SMART_FRIDGE_DB_PATH", str(root / "data" / "fridge.sqlite3"))
     checks["db"] = db_health(db_path)

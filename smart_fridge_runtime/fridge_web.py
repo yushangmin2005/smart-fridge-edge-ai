@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from fridge_sensor import read_sensor_state
+
 
 DEFAULT_LIMIT = 24
 
@@ -148,10 +150,12 @@ class SmartFridgeStore:
         self.yolo_dir = Path(env("SMART_FRIDGE_YOLO_OUTPUT_DIR", str(self.tmp_dir / "yolo"))).expanduser()
         self.vlm_dir = Path(env("SMART_FRIDGE_VLM_OUTPUT_DIR", str(self.tmp_dir / "vlm"))).expanduser()
         self.alerts_path = Path(env("SMART_FRIDGE_ALERTS_PATH", str(root / "data" / "alerts.json"))).expanduser()
+        self.sensor_state_path = Path(env("SMART_FRIDGE_SENSOR_STATE_PATH", str(root / "data" / "sensor_state.json"))).expanduser()
         self.pipeline_log = Path(env("SMART_FRIDGE_PIPELINE_LOG", str(root / "logs" / "fridge-pipeline.log"))).expanduser()
         self.pipeline_pid = Path(env("SMART_FRIDGE_PIPELINE_PID", str(root / "run" / "fridge-pipeline.pid"))).expanduser()
         self.web_pid = Path(env("SMART_FRIDGE_WEB_PID", str(root / "run" / "fridge-web.pid"))).expanduser()
         self.vlm_pid = Path(env("SMART_FRIDGE_VLM_PID", str(Path.home() / "vlm-inference" / "run" / "vlm.pid"))).expanduser()
+        self.sensor_pid = Path(env("SMART_FRIDGE_SENSOR_PID", str(root / "run" / "fridge-sensor.pid"))).expanduser()
 
     def connect(self):
         if not self.db_path.exists():
@@ -264,6 +268,10 @@ class SmartFridgeStore:
         active_objects = state.get("active_objects") or []
         active_food_ids = {item.get("food_id") for item in active_objects if item.get("food_id")}
         foods = self.foods(50)
+        sensor = read_sensor_state(
+            self.sensor_state_path,
+            env_int("SMART_FRIDGE_SENSOR_STALE_SECONDS", 10),
+        )
         for food in foods:
             food["active"] = food.get("food_id") in active_food_ids and food.get("status_current") != "food.removed"
         return {
@@ -277,11 +285,13 @@ class SmartFridgeStore:
                 "camera_device": env("SMART_FRIDGE_CAMERA_DEVICE", "auto"),
                 "vlm_timeout_seconds": env_int("SMART_FRIDGE_VLM_TIMEOUT", 3600),
                 "refresh_seconds": env_int("SMART_FRIDGE_WEB_REFRESH_SECONDS", 30),
+                "sensor_stale_seconds": env_int("SMART_FRIDGE_SENSOR_STALE_SECONDS", 10),
             },
             "services": {
                 "pipeline": check_pid(self.pipeline_pid),
                 "web": check_pid(self.web_pid),
                 "vlm": check_pid(self.vlm_pid),
+                "sensor": check_pid(self.sensor_pid),
             },
             "db_counts": self.db_counts(),
             "foods": foods,
@@ -291,6 +301,7 @@ class SmartFridgeStore:
             "alerts": read_json(self.alerts_path, {"alerts": [], "generated_at": None}) or {"alerts": []},
             "active_objects": active_objects,
             "cloud_advice": state.get("cloud_advice") or {},
+            "sensor": sensor,
             "latest_capture": latest_capture,
             "captures": captures,
             "crops": crops,
@@ -487,6 +498,34 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--text);
     }
     .advice-list li { margin: 4px 0; overflow-wrap: anywhere; }
+    .sensor-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      min-width: 0;
+    }
+    .sensor-item {
+      min-width: 0;
+      padding: 4px 16px 6px;
+      border-right: 1px solid var(--soft);
+    }
+    .sensor-item:first-child { padding-left: 0; }
+    .sensor-item:last-child { padding-right: 0; border-right: 0; }
+    .sensor-label { color: var(--muted); font-size: 12px; }
+    .sensor-value { margin-top: 5px; font-size: 22px; font-weight: 750; overflow-wrap: anywhere; }
+    .sensor-value.open { color: var(--warn); }
+    .sensor-value.closed { color: var(--ok); }
+    .sensor-note { min-height: 18px; margin-top: 2px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .sensor-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+    }
     .alert-list { display: grid; gap: 8px; }
     .alert {
       border: 1px solid var(--line);
@@ -553,6 +592,9 @@ INDEX_HTML = r"""<!doctype html>
       main { grid-template-columns: 1fr; }
       .grid-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .split { grid-template-columns: 1fr; }
+      .sensor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 14px; }
+      .sensor-item:nth-child(2) { border-right: 0; }
+      .sensor-item:nth-child(3) { padding-left: 0; }
     }
     @media (max-width: 620px) {
       .topbar { align-items: flex-start; flex-direction: column; }
@@ -561,6 +603,7 @@ INDEX_HTML = r"""<!doctype html>
       .thumbs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .photo-wrap { min-height: 220px; }
       .section-head { align-items: flex-start; flex-direction: column; }
+      .sensor-footer { align-items: flex-start; flex-direction: column; }
     }
     @media (max-width: 420px) {
       main { padding: 10px; }
@@ -581,6 +624,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="actions">
         <span class="badge off" id="pipelineStatus">定时任务</span>
         <span class="badge off" id="vlmStatus">主识别服务</span>
+        <span class="badge off" id="sensorStatus">环境数据</span>
         <button id="refreshBtn" type="button">刷新</button>
       </div>
     </div>
@@ -610,6 +654,19 @@ INDEX_HTML = r"""<!doctype html>
             <div class="kv"><span>下次识别</span><span id="nextRecognition">-</span></div>
             <div class="kv"><span>照片保留</span><span id="captureCount">-</span></div>
           </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="section-head"><h2>冰箱环境</h2><span class="muted" id="sensorFreshness">等待数据</span></div>
+        <div class="content">
+          <div class="sensor-grid">
+            <div class="sensor-item"><div class="sensor-label">门状态</div><div class="sensor-value" id="doorState">-</div><div class="sensor-note">按实际开关关系显示</div></div>
+            <div class="sensor-item"><div class="sensor-label">环境温度</div><div class="sensor-value" id="ambientTemp">-</div><div class="sensor-note">冰箱内部空气</div></div>
+            <div class="sensor-item"><div class="sensor-label">湿度</div><div class="sensor-value" id="humidity">-</div><div class="sensor-note">相对湿度</div></div>
+            <div class="sensor-item"><div class="sensor-label">温度探头</div><div class="sensor-value" id="probeTemp">-</div><div class="sensor-note" id="probeNote">内部探头</div></div>
+          </div>
+          <div class="sensor-footer"><span id="sensorUpdated">尚未收到传感器数据</span><span id="sensorHealth">-</span></div>
         </div>
       </section>
 
@@ -841,6 +898,42 @@ INDEX_HTML = r"""<!doctype html>
       `).join("") : "";
     }
 
+    function formatReading(value, suffix, digits = 1) {
+      const number = Number(value);
+      return Number.isFinite(number) ? `${number.toFixed(digits)}${suffix}` : "-";
+    }
+
+    function renderSensor(data) {
+      const sensor = data.sensor || {};
+      const values = sensor.data || {};
+      const usable = Boolean(sensor.available);
+      const healthy = Boolean(sensor.ok && sensor.fresh);
+      const connected = Boolean(sensor.connected);
+      const status = $("sensorStatus");
+      status.className = `badge ${healthy ? "ok" : connected ? "warn" : "bad"}`;
+      status.textContent = healthy ? "环境数据正常" : connected ? "环境数据异常" : "环境数据中断";
+
+      $("sensorFreshness").textContent = sensor.fresh
+        ? `刚刚更新${sensor.age_seconds !== null && sensor.age_seconds !== undefined ? ` · ${sensor.age_seconds} 秒前` : ""}`
+        : usable ? "数据已过期" : "等待数据";
+      $("doorState").textContent = values.door_open === true ? "已打开" : values.door_open === false ? "已关闭" : "-";
+      $("doorState").className = `sensor-value ${values.door_open === true ? "open" : values.door_open === false ? "closed" : ""}`;
+      $("ambientTemp").textContent = formatReading(values.ambient_temp_c, "°C");
+      $("humidity").textContent = formatReading(values.humidity_pct, "%");
+      $("probeTemp").textContent = formatReading(values.ntc_temp_c, "°C");
+      $("probeNote").textContent = values.ntc_estimated ? "估算值，仅供趋势参考" : "内部探头";
+      $("sensorUpdated").textContent = sensor.received_at ? `更新时间 ${fmtTime(sensor.received_at)}` : "尚未收到传感器数据";
+
+      const failed = [
+        values.aht_ok === false ? "温湿度" : "",
+        values.ntc_ok === false ? "温度探头" : "",
+        values.door_sensor_ok === false ? "门磁" : "",
+      ].filter(Boolean);
+      $("sensorHealth").textContent = failed.length
+        ? `${failed.join("、")}需要检查`
+        : usable ? "环境、探头和门磁状态正常" : "请检查传感器连接";
+    }
+
     function renderAlerts(data) {
       const payload = data.alerts || {};
       const alerts = payload.alerts || [];
@@ -899,6 +992,7 @@ INDEX_HTML = r"""<!doctype html>
       $("debugServices").textContent = [
         serviceText("自动识别", data.services?.pipeline),
         serviceText("主识别", data.services?.vlm),
+        serviceText("环境采集", data.services?.sensor),
         serviceText("Web", data.services?.web),
       ].join(" · ");
       $("debugDb").textContent = `${data.config?.db_path || "-"} / 食物 ${counts.foods ?? 0} / 观察 ${counts.food_observations ?? 0} / 事件 ${counts.food_events ?? 0}`;
@@ -939,6 +1033,7 @@ INDEX_HTML = r"""<!doctype html>
       renderActiveObjects(data);
       renderAlerts(data);
       renderCloudAdvice(data);
+      renderSensor(data);
       renderThumbs("captures", data.captures || []);
       renderDebug(data, lastCycle);
     }

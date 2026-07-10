@@ -17,13 +17,17 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from fridge_sensor import read_sensor_state, sensor_ai_context
+
 
 DEFAULT_PROMPT = """Return exactly one JSON object for the visible food crop.
 Required keys: is_food, food_name, category, composition, freshness, freshness_score,
 visible_state, storage_advice, risk_level, confidence, notes."""
 
 CLOUD_ADVICE_PROMPT = """你是智能冰箱的云端综合建议模型。你会收到当前仍然活跃的食物对象、
-本轮新增/移除/未变信息和基础运行状态。请只输出一个 JSON 对象，不要输出 Markdown。
+本轮新增/移除/未变信息、基础运行状态和 ESP32-S3 环境传感器快照。请综合温度、湿度、
+门状态和数据时效性进行判断；探头温度标记为估算值时只能作为趋势参考。门状态已经纠正为
+实际物理状态，不要再次取反。请只输出一个 JSON 对象，不要输出 Markdown。
 字段要求：
 - summary: 一句话总结当前冰箱状态。
 - risk_level: normal、attention、danger 或 unknown。
@@ -458,6 +462,28 @@ def compact_active_object(item):
     }
 
 
+def load_sensor_context():
+    root = Path(env("SMART_FRIDGE_ROOT", str(Path(__file__).resolve().parents[1])))
+    state_path = env("SMART_FRIDGE_SENSOR_STATE_PATH", str(root / "data" / "sensor_state.json"))
+    stale_seconds = env_int("SMART_FRIDGE_SENSOR_STALE_SECONDS", 10)
+    return sensor_ai_context(read_sensor_state(state_path, stale_seconds))
+
+
+def build_cloud_advice_user_payload(active_objects, cycle_summary, sensor_context):
+    return {
+        "captured_at": cycle_summary.get("captured_at"),
+        "completed_at": cycle_summary.get("completed_at"),
+        "next_scheduled_at": cycle_summary.get("next_scheduled_at"),
+        "detections": cycle_summary.get("detections"),
+        "active_count": cycle_summary.get("active_count"),
+        "added": cycle_summary.get("added") or [],
+        "unchanged": cycle_summary.get("unchanged") or [],
+        "removed": cycle_summary.get("removed") or [],
+        "active_objects": [compact_active_object(item) for item in active_objects],
+        "sensor_snapshot": sensor_context or load_sensor_context(),
+    }
+
+
 def normalize_cloud_advice(payload):
     result = dict(payload or {})
     result.setdefault("summary", "暂无云端建议。")
@@ -496,7 +522,7 @@ def load_mock_cloud_advice(mock_value):
     raise RuntimeError("SMART_FRIDGE_CLOUD_ADVICE_MOCK_JSON does not point to a JSON object or file")
 
 
-def request_cloud_advice(active_objects, cycle_summary):
+def request_cloud_advice(active_objects, cycle_summary, sensor_context=None):
     generated_at = utc_now()
     model = env("SMART_FRIDGE_CLOUD_ADVICE_MODEL", "deepseek-v4-flash")
     provider = env("SMART_FRIDGE_CLOUD_ADVICE_PROVIDER", "deepseek")
@@ -522,18 +548,7 @@ def request_cloud_advice(active_objects, cycle_summary):
     if not api_key:
         return dict(base, skipped=True, reason="missing_deepseek_api_key")
 
-    compact_objects = [compact_active_object(item) for item in active_objects]
-    user_payload = {
-        "captured_at": cycle_summary.get("captured_at"),
-        "completed_at": cycle_summary.get("completed_at"),
-        "next_scheduled_at": cycle_summary.get("next_scheduled_at"),
-        "detections": cycle_summary.get("detections"),
-        "active_count": cycle_summary.get("active_count"),
-        "added": cycle_summary.get("added") or [],
-        "unchanged": cycle_summary.get("unchanged") or [],
-        "removed": cycle_summary.get("removed") or [],
-        "active_objects": compact_objects,
-    }
+    user_payload = build_cloud_advice_user_payload(active_objects, cycle_summary, sensor_context)
     payload = {
         "model": model,
         "messages": [
@@ -607,7 +622,24 @@ def load_mock_vlm_result(mock_value):
     raise RuntimeError("SMART_FRIDGE_VLM_MOCK_JSON does not point to a JSON object or file")
 
 
-def call_vlm(crop_path, yolo_detection, raw_response_path=None, raw_text_path=None):
+def build_vlm_user_text(yolo_detection, sensor_context):
+    yolo_hint = {
+        "yolo_label": yolo_detection.get("class_name"),
+        "yolo_confidence": yolo_detection.get("confidence"),
+        "yolo_box": yolo_detection.get("box"),
+    }
+    return (
+        "Analyze this cropped refrigerator image. YOLO candidate:\n"
+        + json.dumps(yolo_hint, ensure_ascii=False)
+        + "\nRefrigerator sensor snapshot (door_state and door_open are corrected physical values):\n"
+        + json.dumps(sensor_context or load_sensor_context(), ensure_ascii=False)
+        + "\nUse the sensor values as freshness and storage context, but never infer food identity from sensors alone. "
+        + "reported_door_open_count is the device-reported counter before physical-state correction. "
+        + "Return only the required JSON object."
+    )
+
+
+def call_vlm(crop_path, yolo_detection, raw_response_path=None, raw_text_path=None, sensor_context=None):
     mock = load_mock_vlm_result(env("SMART_FRIDGE_VLM_MOCK_JSON"))
     if mock is not None:
         if raw_response_path:
@@ -620,16 +652,7 @@ def call_vlm(crop_path, yolo_detection, raw_response_path=None, raw_text_path=No
     timeout = env_int("SMART_FRIDGE_VLM_TIMEOUT", 3600)
     model = resolve_vlm_model(chat_url)
     prompt = load_prompt()
-    yolo_hint = {
-        "yolo_label": yolo_detection.get("class_name"),
-        "yolo_confidence": yolo_detection.get("confidence"),
-        "yolo_box": yolo_detection.get("box"),
-    }
-    user_text = (
-        "Analyze this cropped refrigerator image. YOLO candidate:\n"
-        + json.dumps(yolo_hint, ensure_ascii=False)
-        + "\nReturn only the required JSON object."
-    )
+    user_text = build_vlm_user_text(yolo_detection, sensor_context)
     base_payload = {
         "model": model,
         "messages": [
@@ -836,8 +859,15 @@ def run_once(args):
         vlm_response_path = "{0}.response.json".format(vlm_json_path)
         vlm_raw_text_path = "{0}.raw.txt".format(vlm_json_path)
         crop_path, crop_box = crop_detection(image_path, detection, crop_path)
+        vlm_sensor_context = load_sensor_context()
         try:
-            vlm_result = call_vlm(crop_path, detection, vlm_response_path, vlm_raw_text_path)
+            vlm_result = call_vlm(
+                crop_path,
+                detection,
+                vlm_response_path,
+                vlm_raw_text_path,
+                sensor_context=vlm_sensor_context,
+            )
         except Exception as exc:
             if env_bool("SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR", True):
                 vlm_result = fallback_vlm_result(detection, str(exc))
@@ -901,6 +931,7 @@ def run_once(args):
             "first_seen_at": now,
             "last_seen_at": now,
             "vlm": vlm_result,
+            "sensor_snapshot": vlm_sensor_context,
         }
         current_objects.append(current_object)
         added.append(
@@ -941,6 +972,7 @@ def run_once(args):
         "deleted_captures": deleted_captures,
         "state_path": str(state_path),
         "errors": errors,
+        "sensor_snapshot": load_sensor_context(),
     }
     state = {
         "updated_at": now,
@@ -950,7 +982,7 @@ def run_once(args):
         "last_cycle": summary,
     }
     write_json(state_path, state)
-    cloud_advice = request_cloud_advice(current_objects, summary)
+    cloud_advice = request_cloud_advice(current_objects, summary, summary["sensor_snapshot"])
     summary["cloud_advice"] = cloud_advice
     state["cloud_advice"] = cloud_advice
     state["last_cycle"] = summary

@@ -19,13 +19,14 @@
 - 公开训练数据：默认使用 Roboflow Universe `fridge-dataset/fridge-food-images/14`，手动导出的 YOLO11/YOLOv8 数据集也可放入 `data/fridge-food-images/`
 - 智能冰箱数据库：SQLite，板端默认路径为 `~/smart-fridge/data/fridge.sqlite3`
 - 智能冰箱调度：`ffmpeg` + v4l2 每 1 小时拍照一次，默认使用 `/dev/video10` UVC 摄像头
+- 环境传感器接入：Python 标准库 `termios/select` 持续读取 ESP32-S3 的 `115200 8N1` JSON Lines v2 数据，原子写入 `sensor_state.json`
 - 智能冰箱 Web 前端：Python 标准库 `http.server` + SQLite 只读查询，默认端口 `8090`
-- 智能冰箱自启动：`systemd --user` 管理 VLM、Web、自动识别管线和维护定时器；`loginctl linger` 保持用户服务开机常驻
+- 智能冰箱自启动：`systemd --user` 管理传感器、VLM、Web、自动识别管线和维护定时器；`loginctl linger` 保持用户服务开机常驻
 - 智能冰箱维护：Python 标准库脚本定时清理临时图片、YOLO/VLM 输出和日志，并把异常提醒写入 `alerts.json` 供 Web 展示
 - 远端维护工具：Pi Coding Agent `@earendil-works/pi-coding-agent`，用户态安装到 `firecar-pi:~/.local`
 - 板端 Pi 工具扩展：TypeScript Pi extension，将 NanoPC-T4 GPIO、I2C、串口、摄像头等外设能力注册为 Pi agent tool
 - 板端 GPIO/I2C 系统工具：`gpiod`、`libgpiod-dev`、`i2c-tools`，配合 `gpio/i2c` 用户组和 udev 规则开放非 root 访问
-- 云端建议：每轮自动识别后将当前 active objects 发送到 DeepSeek `deepseek-v4-flash`，结构化建议写入 `pipeline_state.json`
+- 云端建议：每轮自动识别后将当前 active objects 和最新环境传感器快照发送到 DeepSeek `deepseek-v4-flash`，结构化建议写入 `pipeline_state.json`
 - 板端时间同步：`systemd-timesyncd` 固定 IP NTP 源 + `smart-fridge-http-time-sync.timer` HTTPS Date 兜底校时
 - 脚本语言：Bash
 
@@ -108,6 +109,11 @@ ssh firecar-pi '~/smart-fridge/bin/start_web.sh'
 ssh firecar-pi '~/smart-fridge/bin/status_web.sh'
 ssh firecar-pi '~/smart-fridge/bin/stop_web.sh'
 
+# 启动/停止/查看 ESP32-S3 环境采集
+ssh firecar-pi '~/smart-fridge/bin/start_sensor.sh'
+ssh firecar-pi '~/smart-fridge/bin/status_sensor.sh'
+ssh firecar-pi '~/smart-fridge/bin/stop_sensor.sh'
+
 # 查看远端 Pi agent 版本
 ssh firecar-pi 'bash -lc "pi --version; piagent --version"'
 
@@ -153,11 +159,14 @@ YOLO 部署后，远程目录结构为：
   config/smart_fridge.env
   data/fridge.sqlite3  # SQLite 主库，默认不提交
   data/pipeline_state.json
+  data/sensor_state.json # 已纠正门状态的最新传感器快照
   data/alerts.json
   data/backups/        # 手动备份库，默认不提交
   logs/fridge-alerts.log
   logs/fridge-web.log
+  logs/fridge-sensor.log
   run/fridge-web.pid
+  run/fridge-sensor.pid
   tmp/captures/        # 定时拍照临时图，最多保留 24 张
   tmp/crops/           # 新增目标裁剪图
   tmp/yolo/            # YOLO JSON 输出
@@ -165,6 +174,7 @@ YOLO 部署后，远程目录结构为：
   runtime/fridge_db.py
   runtime/fridge_maintenance.py
   runtime/fridge_pipeline.py
+  runtime/fridge_sensor.py
   runtime/fridge_web.py
   runtime/vlm_food_prompt.txt
 ```
@@ -173,6 +183,7 @@ YOLO 部署后，远程目录结构为：
 
 ```text
 ~/.config/systemd/user/smart-fridge-vlm.service
+~/.config/systemd/user/smart-fridge-sensor.service
 ~/.config/systemd/user/smart-fridge-web.service
 ~/.config/systemd/user/smart-fridge-pipeline.service
 ~/.config/systemd/user/smart-fridge-maintenance.service
@@ -244,6 +255,22 @@ SMART_FRIDGE_PI_TOOLS_ALLOW_I2C_WRITE=1
 
 详细职责边界见 [docs/smart-fridge-hybrid-pipeline.md](docs/smart-fridge-hybrid-pipeline.md)。
 
+## 环境传感器链路
+
+ESP32-S3 通过 CP2102N 串口每秒上报一行 v2 JSON，包含环境温度、开尔文温度、湿度、NTC 探头温度、估算/过温标志、门状态、序列号、运行时间和三类传感器健康标志。`smart-fridge-sensor.service` 独占读取串口，并持续更新 `~/smart-fridge/data/sensor_state.json`。
+
+当前硬件上报的 `door_open/door_state` 与实际门状态相反，因此默认配置 `SMART_FRIDGE_SENSOR_DOOR_INVERTED=1`。纠正在 `fridge_sensor.py` 接入层只执行一次：设备上报 `closed/false` 时，对外统一提供实际 `open/true`；原始值保留在快照的 `raw` 和 `reported_*` 字段中供排查。固件的 `door_open_count` 无法仅凭单帧可靠反推为实际开门次数，因此对 AI 明确标记为 `reported_door_open_count`，不在主界面展示为实际计数。
+
+```bash
+SMART_FRIDGE_SENSOR_DEVICE=auto
+SMART_FRIDGE_SENSOR_BAUD_RATE=115200
+SMART_FRIDGE_SENSOR_STATE_PATH=/home/pi/smart-fridge/data/sensor_state.json
+SMART_FRIDGE_SENSOR_DOOR_INVERTED=1
+SMART_FRIDGE_SENSOR_STALE_SECONDS=10
+SMART_FRIDGE_SENSOR_RETRY_SECONDS=5
+SMART_FRIDGE_SENSOR_READ_TIMEOUT_SECONDS=10
+```
+
 ## 自动识别管线
 
 板端自动链路由 `~/smart-fridge/bin/fridge_pipeline.sh` 执行单轮识别，`~/smart-fridge/bin/start_pipeline.sh` 启动后台循环。默认每 3600 秒执行一次：
@@ -251,8 +278,9 @@ SMART_FRIDGE_PI_TOOLS_ALLOW_I2C_WRITE=1
 ```text
 摄像头拍照 -> 保留最近 24 张临时图 -> YOLO 检测 -> 与上一轮状态做 IoU 匹配
   -> unchanged 维持原 food_id，不重复调用 VLM
-  -> added 裁剪新增框，发送给 llama.cpp VLM 输出严格 JSON，再写 SQLite
+  -> added 裁剪新增框，与最新环境快照一起发送给 llama.cpp VLM，再写 SQLite
   -> removed 写入 food.removed 事件，并从当前 active state 移除
+  -> 本轮结束后将 active objects、变化摘要和最新环境快照发送给 DeepSeek
 ```
 
 关键配置在远程 `~/smart-fridge/config/smart_fridge.env`：
@@ -268,17 +296,19 @@ SMART_FRIDGE_VLM_TIMEOUT=3600
 SMART_FRIDGE_CLOUD_ADVICE_ENABLED=1
 SMART_FRIDGE_CLOUD_ADVICE_MODEL=deepseek-v4-flash
 SMART_FRIDGE_CLOUD_ADVICE_AUTH_PATH=/home/pi/.pi/agent/auth.json
+SMART_FRIDGE_SENSOR_STATE_PATH=/home/pi/smart-fridge/data/sensor_state.json
+SMART_FRIDGE_SENSOR_DOOR_INVERTED=1
 ```
 
-VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。
+VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。食物身份仍以图片为准；新鲜度和储存建议可参考带时间戳的温湿度、探头和实际门状态，过期数据或估算探头值不能作为确定性结论。
 
-每轮自动识别完成后，管线会把当前 `active_objects`、本轮新增/未变/移除摘要和下次识别时间发送给 DeepSeek 云端模型，要求返回 JSON：`summary`、`risk_level`、`action_items`、`item_suggestions`、`next_check`。结果写入 `~/smart-fridge/data/pipeline_state.json` 的 `cloud_advice` 字段，并由 Web 面板展示。DeepSeek API key 默认从远端 Pi agent 的 `~/.pi/agent/auth.json` 读取，不写入项目仓库。
+每轮自动识别完成后，管线会把当前 `active_objects`、本轮新增/未变/移除摘要、下次识别时间和最新传感器快照发送给 DeepSeek 云端模型，要求返回 JSON：`summary`、`risk_level`、`action_items`、`item_suggestions`、`next_check`。结果写入 `~/smart-fridge/data/pipeline_state.json` 的 `cloud_advice` 字段，并由 Web 面板展示。DeepSeek API key 默认从远端 Pi agent 的 `~/.pi/agent/auth.json` 读取，不写入项目仓库。
 
-维护定时器默认每 10 分钟执行一次 `~/smart-fridge/bin/fridge_maintenance.sh run-all`，清理临时文件并检查磁盘、服务 PID、最近照片、SQLite、Web API、VLM API 和 GPIO/I2C 命令。最新检查写入 `~/smart-fridge/data/alerts.json`，历史写入 `~/smart-fridge/logs/fridge-alerts.log`。
+维护定时器默认每 10 分钟执行一次 `~/smart-fridge/bin/fridge_maintenance.sh run-all`，清理临时文件并检查磁盘、服务 PID、传感器数据时效、最近照片、SQLite、Web API、VLM API 和 GPIO/I2C 命令。最新检查写入 `~/smart-fridge/data/alerts.json`，历史写入 `~/smart-fridge/logs/fridge-alerts.log`。
 
 ## Web 状态面板
 
-板端 Web 前端由 `~/smart-fridge/bin/fridge_web.sh` 启动，默认监听 `0.0.0.0:8090`，页面每 30 秒刷新一次。它只读取现有 SQLite、`pipeline_state.json`、临时照片目录和管线日志，不主动触发 YOLO/VLM 推理。默认视图聚焦运行是否正常、最新画面、下次识别时间、当前库存、需注意食物、最近变化和近期照片；服务 PID、数据库路径、YOLO/VLM 输出文件和日志收进“调试信息”折叠区。页面展示层会把常见状态、事件类型、风险等级和 YOLO 食材类别汉化；JSON API 保留数据库中的原始字段值，方便调试。
+板端 Web 前端由 `~/smart-fridge/bin/fridge_web.sh` 启动，默认监听 `0.0.0.0:8090`，页面每 30 秒刷新一次。它只读取现有 SQLite、`pipeline_state.json`、`sensor_state.json`、临时照片目录和管线日志，不主动触发 YOLO/VLM 推理。默认视图聚焦运行是否正常、冰箱环境、最新画面、下次识别时间、当前库存、需注意食物、最近变化和近期照片；服务 PID、数据库路径、YOLO/VLM 输出文件和日志收进“调试信息”折叠区。页面展示层会把常见状态、事件类型、风险等级和 YOLO 食材类别汉化；JSON API 同时提供纠正后的环境数据和原始串口帧，方便联调。
 
 ```bash
 ssh firecar-pi '~/smart-fridge/bin/start_web.sh'
@@ -294,6 +324,7 @@ http://192.168.1.115:8090/
 页面展示内容：
 
 - 自动识别和主识别服务是否可用，默认不展示 PID。
+- 冰箱实际门状态、环境温度、相对湿度、内部探头温度、数据更新时间和连接健康状态。
 - 最新拍照画面、下次识别时间和最近 24 张临时照片。
 - 异常提醒：磁盘、服务、数据库、接口和板端工具状态。
 - 云端综合建议、当前库存、需注意数量、食物新鲜度和风险建议。
@@ -450,7 +481,9 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 本地脚本检查：`bash -n scripts/*.sh`
 - 数据库 CLI 语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_db.py`
 - 自动管线语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_pipeline.py`
+- 环境采集与 Web 语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_sensor.py smart_fridge_runtime/fridge_web.py`
 - 维护脚本语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_maintenance.py`
+- 环境数据集成单元测试：`python3 -m unittest discover -s tests -v`，必须覆盖门状态双向取反、数据时效、VLM/DeepSeek 请求载荷和 Web API 字段。
 - 本地 SQLite 冒烟：使用临时目录执行 `fridge_db.py init/ingest/list-foods/show-food/health`，完成后删除临时库。
 - 本地管线差分冒烟：使用假 YOLO 与 mock VLM 执行三轮 `added -> unchanged -> removed`，并检查 24 张临时图保留。
 - 本地训练配置检查：`cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env && scripts/setup_yolo_training_local.sh`
@@ -463,7 +496,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
 - 远程 SQLite 检查：`scripts/remote_smart_fridge_db_check.sh firecar-pi`
 - 远程维护检查：`ssh firecar-pi '~/smart-fridge/bin/fridge_maintenance.sh run-all'`，当前 `alerts.alert_count=0`。
-- 远程自启动检查：`ssh firecar-pi 'systemctl --user is-active smart-fridge-vlm.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer'`，四项应均为 `active`。
+- 远程自启动检查：`ssh firecar-pi 'systemctl --user is-active smart-fridge-vlm.service smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer'`，五项应均为 `active`。
+- 远程传感器检查：`ssh firecar-pi '~/smart-fridge/bin/fridge_sensor.sh --check'`，应返回 `fresh=true`，且当前设备上报 `closed/false` 时纠正字段为 `door_state=open`、`door_open=true`。
 - 远程管线检查：真实 `/dev/video10` 摄像头已通过 `ffmpeg -f v4l2` 拍出 640x360 JPEG；真实摄像头当前 YOLO 检测为 0；公开数据集样图远程 mock VLM 验证通过 `added=11 -> unchanged=11 -> removed=11`。
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
@@ -486,9 +520,17 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 不提交 SQLite 主库、WAL/SHM 附属文件或临时数据库。
 - 不删除远程用户目录中与本项目无关的文件。
 - 不在未确认接线、pin mapping、总线地址和外设安全前启用 Pi board tools 的 GPIO/I2C 写操作。
+- `smart-fridge-sensor.service` 运行期间不再用 `cat/head` 等其他进程持续读取同一串口；串口数据由单一采集服务持有，网页和 AI 只读 `sensor_state.json`。
 - 不把 sudo 密码、DeepSeek API key、Roboflow API key 或其他凭据写入 README、脚本、systemd unit 或 Git。
 
 ## 修改历史
+
+- `codex-vlm-inference-framework.0.12.0.202607102131`
+  - 新增 ESP32-S3 串口环境采集模块和 `smart-fridge-sensor.service`，持续保存带时效标记的 v2 传感器快照。
+  - 在接入层统一纠正实际门状态：设备上报 `closed/false` 对外转换为 `open/true`，同时保留原始字段用于排查。
+  - 本地 VLM 与 DeepSeek 云端综合建议请求均新增完整传感器上下文，温湿度、探头、门状态与健康标志可参与判断。
+  - Web 面板新增“冰箱环境”区域和环境采集健康状态；维护任务新增传感器服务、断连、过期和子传感器异常检查。
+  - 新增 6 项标准库单元测试，覆盖门状态纠正、数据时效、AI 载荷和 Web 展示字段。
 
 - `codex-vlm-inference-framework.0.1.0.202606241031`
   - 新增 CPU-only VLM 推理框架部署说明。

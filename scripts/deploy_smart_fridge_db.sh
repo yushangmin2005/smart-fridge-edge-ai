@@ -9,6 +9,7 @@ RUNNER="$REPO_ROOT/smart_fridge_runtime/fridge_db.py"
 PIPELINE="$REPO_ROOT/smart_fridge_runtime/fridge_pipeline.py"
 WEB="$REPO_ROOT/smart_fridge_runtime/fridge_web.py"
 MAINTENANCE="$REPO_ROOT/smart_fridge_runtime/fridge_maintenance.py"
+SENSOR="$REPO_ROOT/smart_fridge_runtime/fridge_sensor.py"
 PROMPT="$REPO_ROOT/smart_fridge_runtime/vlm_food_prompt.txt"
 
 if [ ! -f "$RUNNER" ]; then
@@ -25,6 +26,10 @@ if [ ! -f "$WEB" ]; then
 fi
 if [ ! -f "$MAINTENANCE" ]; then
   echo "Missing local runtime: $MAINTENANCE" >&2
+  exit 2
+fi
+if [ ! -f "$SENSOR" ]; then
+  echo "Missing local runtime: $SENSOR" >&2
   exit 2
 fi
 if [ ! -f "$PROMPT" ]; then
@@ -56,6 +61,14 @@ mkdir -p "$SMART_FRIDGE_REMOTE_DIR"/{bin,config,data,runtime,tmp}
 cat > "$SMART_FRIDGE_REMOTE_DIR/config/smart_fridge.env.example" <<EOF
 SMART_FRIDGE_DB_PATH=$SMART_FRIDGE_REMOTE_DIR/data/fridge.sqlite3
 SMART_FRIDGE_DUPLICATE_WINDOW_MINUTES=120
+SMART_FRIDGE_STATE_PATH=$SMART_FRIDGE_REMOTE_DIR/data/pipeline_state.json
+SMART_FRIDGE_SENSOR_DEVICE=auto
+SMART_FRIDGE_SENSOR_BAUD_RATE=115200
+SMART_FRIDGE_SENSOR_STATE_PATH=$SMART_FRIDGE_REMOTE_DIR/data/sensor_state.json
+SMART_FRIDGE_SENSOR_DOOR_INVERTED=1
+SMART_FRIDGE_SENSOR_STALE_SECONDS=10
+SMART_FRIDGE_SENSOR_RETRY_SECONDS=5
+SMART_FRIDGE_SENSOR_READ_TIMEOUT_SECONDS=10
 SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS=3600
 SMART_FRIDGE_CAPTURE_KEEP=24
 SMART_FRIDGE_CAMERA_DEVICE=auto
@@ -144,6 +157,13 @@ export SMART_FRIDGE_ROOT="$ROOT"
 : "${SMART_FRIDGE_YOLO_MIN_CONFIDENCE:=0.65}"
 : "${SMART_FRIDGE_TMP_DIR:=$ROOT/tmp}"
 : "${SMART_FRIDGE_STATE_PATH:=$ROOT/data/pipeline_state.json}"
+: "${SMART_FRIDGE_SENSOR_DEVICE:=auto}"
+: "${SMART_FRIDGE_SENSOR_BAUD_RATE:=115200}"
+: "${SMART_FRIDGE_SENSOR_STATE_PATH:=$ROOT/data/sensor_state.json}"
+: "${SMART_FRIDGE_SENSOR_DOOR_INVERTED:=1}"
+: "${SMART_FRIDGE_SENSOR_STALE_SECONDS:=10}"
+: "${SMART_FRIDGE_SENSOR_RETRY_SECONDS:=5}"
+: "${SMART_FRIDGE_SENSOR_READ_TIMEOUT_SECONDS:=10}"
 : "${SMART_FRIDGE_VLM_PROMPT_PATH:=$ROOT/runtime/vlm_food_prompt.txt}"
 : "${SMART_FRIDGE_CLOUD_ADVICE_ENABLED:=1}"
 : "${SMART_FRIDGE_CLOUD_ADVICE_PROVIDER:=deepseek}"
@@ -174,6 +194,9 @@ export SMART_FRIDGE_DB_PATH SMART_FRIDGE_DUPLICATE_WINDOW_MINUTES
 export SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS SMART_FRIDGE_CAPTURE_KEEP
 export SMART_FRIDGE_YOLO_MIN_CONFIDENCE
 export SMART_FRIDGE_TMP_DIR SMART_FRIDGE_STATE_PATH SMART_FRIDGE_VLM_PROMPT_PATH
+export SMART_FRIDGE_SENSOR_DEVICE SMART_FRIDGE_SENSOR_BAUD_RATE SMART_FRIDGE_SENSOR_STATE_PATH
+export SMART_FRIDGE_SENSOR_DOOR_INVERTED SMART_FRIDGE_SENSOR_STALE_SECONDS
+export SMART_FRIDGE_SENSOR_RETRY_SECONDS SMART_FRIDGE_SENSOR_READ_TIMEOUT_SECONDS
 export SMART_FRIDGE_CLOUD_ADVICE_ENABLED SMART_FRIDGE_CLOUD_ADVICE_PROVIDER
 export SMART_FRIDGE_CLOUD_ADVICE_MODEL SMART_FRIDGE_CLOUD_ADVICE_URL
 export SMART_FRIDGE_CLOUD_ADVICE_TIMEOUT SMART_FRIDGE_CLOUD_ADVICE_MAX_TOKENS
@@ -233,6 +256,18 @@ exec python3 "$ROOT/runtime/fridge_web.py" "$@"
 EOF
 chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/fridge_web.sh"
 
+cat > "$SMART_FRIDGE_REMOTE_DIR/bin/fridge_sensor.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$ROOT/bin/fridge_db_env.sh"
+
+exec python3 "$ROOT/runtime/fridge_sensor.py" "$@"
+EOF
+chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/fridge_sensor.sh"
+
 cat > "$SMART_FRIDGE_REMOTE_DIR/bin/fridge_pipeline_service.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -258,6 +293,18 @@ echo "$$" > "$PID_FILE"
 exec "$ROOT/bin/fridge_web.sh" --host "$SMART_FRIDGE_WEB_HOST" --port "$SMART_FRIDGE_WEB_PORT"
 EOF
 chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/fridge_web_service.sh"
+
+cat > "$SMART_FRIDGE_REMOTE_DIR/bin/fridge_sensor_service.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PID_FILE="$ROOT/run/fridge-sensor.pid"
+mkdir -p "$ROOT/run" "$ROOT/logs"
+echo "$$" > "$PID_FILE"
+exec "$ROOT/bin/fridge_sensor.sh"
+EOF
+chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/fridge_sensor_service.sh"
 
 cat > "$SMART_FRIDGE_REMOTE_DIR/bin/vlm_server_foreground.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -508,6 +555,61 @@ fi
 EOF
 chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/status_web.sh"
 
+cat > "$SMART_FRIDGE_REMOTE_DIR/bin/start_sensor.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PID_FILE="$ROOT/run/fridge-sensor.pid"
+LOG_FILE="$ROOT/logs/fridge-sensor.log"
+mkdir -p "$ROOT/run" "$ROOT/logs"
+
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" >/dev/null 2>&1; then
+  echo "Smart-fridge sensor reader already running with PID $(cat "$PID_FILE")"
+  exit 0
+fi
+
+nohup "$ROOT/bin/fridge_sensor.sh" >> "$LOG_FILE" 2>&1 &
+pid="$!"
+echo "$pid" > "$PID_FILE"
+echo "Started smart-fridge sensor reader PID $pid; log: $LOG_FILE"
+EOF
+chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/start_sensor.sh"
+
+cat > "$SMART_FRIDGE_REMOTE_DIR/bin/stop_sensor.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PID_FILE="$ROOT/run/fridge-sensor.pid"
+if [ ! -f "$PID_FILE" ]; then
+  echo "Smart-fridge sensor reader is not running."
+  exit 0
+fi
+pid="$(cat "$PID_FILE")"
+if kill -0 "$pid" >/dev/null 2>&1; then
+  kill "$pid"
+  echo "Stopped smart-fridge sensor reader PID $pid"
+fi
+rm -f "$PID_FILE"
+EOF
+chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/stop_sensor.sh"
+
+cat > "$SMART_FRIDGE_REMOTE_DIR/bin/status_sensor.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PID_FILE="$ROOT/run/fridge-sensor.pid"
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" >/dev/null 2>&1; then
+  echo "running PID $(cat "$PID_FILE")"
+else
+  echo "not running"
+fi
+"$ROOT/bin/fridge_sensor.sh" --check || true
+EOF
+chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/status_sensor.sh"
+
 cat > "$SMART_FRIDGE_REMOTE_DIR/bin/install_autostart.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -537,11 +639,27 @@ TimeoutStartSec=180
 WantedBy=default.target
 EOF_UNIT
 
+cat > "$USER_SYSTEMD_DIR/smart-fridge-sensor.service" <<EOF_UNIT
+[Unit]
+Description=Smart Fridge ESP32-S3 sensor reader
+
+[Service]
+Type=simple
+ExecStart=$ROOT/bin/fridge_sensor_service.sh
+ExecStopPost=/bin/rm -f $ROOT/run/fridge-sensor.pid
+Restart=always
+RestartSec=5
+TimeoutStartSec=20
+
+[Install]
+WantedBy=default.target
+EOF_UNIT
+
 cat > "$USER_SYSTEMD_DIR/smart-fridge-pipeline.service" <<EOF_UNIT
 [Unit]
 Description=Smart Fridge automatic recognition pipeline
-After=network-online.target smart-fridge-vlm.service
-Wants=smart-fridge-vlm.service
+After=network-online.target smart-fridge-vlm.service smart-fridge-sensor.service
+Wants=smart-fridge-vlm.service smart-fridge-sensor.service
 
 [Service]
 Type=simple
@@ -558,7 +676,8 @@ EOF_UNIT
 cat > "$USER_SYSTEMD_DIR/smart-fridge-web.service" <<EOF_UNIT
 [Unit]
 Description=Smart Fridge web dashboard
-After=network-online.target
+After=network-online.target smart-fridge-sensor.service
+Wants=smart-fridge-sensor.service
 
 [Service]
 Type=simple
@@ -575,7 +694,7 @@ EOF_UNIT
 cat > "$USER_SYSTEMD_DIR/smart-fridge-maintenance.service" <<EOF_UNIT
 [Unit]
 Description=Smart Fridge cleanup and alert monitor
-After=network-online.target smart-fridge-web.service
+After=network-online.target smart-fridge-web.service smart-fridge-sensor.service
 
 [Service]
 Type=oneshot
@@ -598,18 +717,20 @@ WantedBy=timers.target
 EOF_UNIT
 
 systemctl --user daemon-reload
-systemctl --user stop smart-fridge-pipeline.service smart-fridge-web.service smart-fridge-vlm.service 2>/dev/null || true
+systemctl --user stop smart-fridge-pipeline.service smart-fridge-web.service smart-fridge-sensor.service smart-fridge-vlm.service 2>/dev/null || true
 "$ROOT/bin/stop_pipeline.sh" >/dev/null 2>&1 || true
 "$ROOT/bin/stop_web.sh" >/dev/null 2>&1 || true
+"$ROOT/bin/stop_sensor.sh" >/dev/null 2>&1 || true
 "$HOME/vlm-inference/bin/stop_vlm.sh" >/dev/null 2>&1 || true
 pkill -f "$ROOT/bin/fridge_pipeline_loop.sh" 2>/dev/null || true
 pkill -f "$ROOT/runtime/fridge_web.py" 2>/dev/null || true
+pkill -f "$ROOT/runtime/fridge_sensor.py" 2>/dev/null || true
 pkill -f "$HOME/vlm-inference/runtime/.*/llama-server" 2>/dev/null || true
-rm -f "$ROOT/run/fridge-pipeline.pid" "$ROOT/run/fridge-web.pid" "$HOME/vlm-inference/run/vlm.pid"
-systemctl --user reset-failed smart-fridge-vlm.service smart-fridge-web.service smart-fridge-pipeline.service 2>/dev/null || true
-systemctl --user enable --now smart-fridge-vlm.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer
+rm -f "$ROOT/run/fridge-pipeline.pid" "$ROOT/run/fridge-web.pid" "$ROOT/run/fridge-sensor.pid" "$HOME/vlm-inference/run/vlm.pid"
+systemctl --user reset-failed smart-fridge-vlm.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-sensor.service 2>/dev/null || true
+systemctl --user enable --now smart-fridge-vlm.service smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer
 systemctl --user start smart-fridge-maintenance.service || true
-systemctl --user --no-pager --full status smart-fridge-vlm.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer | sed -n '1,140p' || true
+systemctl --user --no-pager --full status smart-fridge-vlm.service smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer | sed -n '1,160p' || true
 EOF
 chmod +x "$SMART_FRIDGE_REMOTE_DIR/bin/install_autostart.sh"
 
@@ -617,7 +738,7 @@ cat > "$SMART_FRIDGE_REMOTE_DIR/bin/status_autostart.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-systemctl --user --no-pager --full status smart-fridge-vlm.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer smart-fridge-maintenance.service | sed -n '1,180p' || true
+systemctl --user --no-pager --full status smart-fridge-vlm.service smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer smart-fridge-maintenance.service | sed -n '1,200p' || true
 echo "--- timers ---"
 systemctl --user list-timers --all 'smart-fridge-*' --no-pager || true
 EOF
@@ -631,6 +752,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$ROOT/bin/fridge_db.sh" --help >/dev/null
 "$ROOT/bin/fridge_pipeline.sh" --help >/dev/null
 "$ROOT/bin/fridge_web.sh" --help >/dev/null
+"$ROOT/bin/fridge_sensor.sh" --help >/dev/null
 "$ROOT/bin/fridge_maintenance.sh" --help >/dev/null
 "$ROOT/bin/fridge_db.sh" init >/dev/null
 "$ROOT/bin/fridge_db.sh" health
@@ -642,6 +764,7 @@ scp -q "$RUNNER" "$HOST:$REMOTE_PATH/runtime/fridge_db.py"
 scp -q "$PIPELINE" "$HOST:$REMOTE_PATH/runtime/fridge_pipeline.py"
 scp -q "$WEB" "$HOST:$REMOTE_PATH/runtime/fridge_web.py"
 scp -q "$MAINTENANCE" "$HOST:$REMOTE_PATH/runtime/fridge_maintenance.py"
+scp -q "$SENSOR" "$HOST:$REMOTE_PATH/runtime/fridge_sensor.py"
 scp -q "$PROMPT" "$HOST:$REMOTE_PATH/runtime/vlm_food_prompt.txt"
 ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST" \
-  "chmod +x $REMOTE_PATH/runtime/fridge_db.py $REMOTE_PATH/runtime/fridge_pipeline.py $REMOTE_PATH/runtime/fridge_web.py $REMOTE_PATH/runtime/fridge_maintenance.py && $REMOTE_PATH/bin/fridge_db_check.sh"
+  "chmod +x $REMOTE_PATH/runtime/fridge_db.py $REMOTE_PATH/runtime/fridge_pipeline.py $REMOTE_PATH/runtime/fridge_web.py $REMOTE_PATH/runtime/fridge_maintenance.py $REMOTE_PATH/runtime/fridge_sensor.py && $REMOTE_PATH/bin/fridge_db_check.sh && $REMOTE_PATH/bin/install_autostart.sh >/dev/null && for attempt in 1 2 3 4 5 6 7 8 9 10; do $REMOTE_PATH/bin/fridge_sensor.sh --check >/dev/null 2>&1 && break; sleep 1; done && $REMOTE_PATH/bin/fridge_sensor.sh --check >/dev/null && $REMOTE_PATH/bin/fridge_monitor.sh >/dev/null && systemctl --user is-active smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service"
