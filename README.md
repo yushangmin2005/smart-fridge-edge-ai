@@ -1,5 +1,17 @@
 # 智能消防巡检车边缘 AI 推理框架
 
+## 项目背景
+
+家庭冰箱承担着日常食品储存的核心功能，但冰箱内部的食材种类、数量、存放时间和状态通常缺少连续记录。用户往往只能依靠记忆管理库存，容易出现食材被遮挡或遗忘、重复购买、临近变质时未及时处理等问题。联合国环境规划署发布的《2024 年食物浪费指数报告》显示，2022 年全球产生约 10.5 亿吨食物浪费，其中 60% 来自家庭，这说明家庭储存和消费环节具有直接的改进空间。[来源：UNEP](https://www.unep.org/news-and-stories/press-release/world-squanders-over-1-billion-meals-day-un-report)
+
+减少浪费也已成为明确的社会和行业需求。《中华人民共和国反食品浪费法》第十四条提出，家庭应按照日常生活实际需要采购、储存和制作食品。[来源：国家市场监督管理总局](https://www.samr.gov.cn/zw/zfxxgk/fdzdgknr/bgt/art/2023/art_5f92392ecaa14e048bd9a673715c20ca.html) 现行国家标准 `GB/T 37877—2025` 进一步将设备运行与环境参数采集、食品存储信息管理、保质期预警、自动补货提醒和健康饮食建议纳入智能电冰箱的发展方向。[来源：国家市场监督管理总局](https://www.samr.gov.cn/xw/sj/art/2025/art_05f13b4a01e44eed855251d12cd6c2f3.html)
+
+这类需求不能只靠一次图像识别解决。系统既要知道“当前有什么”，也要理解食材何时出现、是否重复入库、外观状态如何变化，并结合温度、湿度、门状态、存放时长和历史记录持续判断。若所有图片都直接上传云端处理，还会受到网络稳定性、响应时间、服务成本和家庭图像隐私等因素制约，因此需要在低功耗边缘设备上建立可离线运行、云端能力可选接入的识别链路。
+
+基于上述问题，本项目以普通冰箱的低成本智能化改造为场景，使用 ESP32-S3 采集环境和门状态，以 RK3399 作为边缘计算节点：YOLO 负责快速预识别、变化触发和重复候选标记，VLM 负责食物名称与可见状态分析，规则和大模型再融合传感器数据、库存 ID 与历史状态形成提醒和建议；结果写入 SQLite，并通过中文 Web 面板展示库存、环境和状态变化。项目目标是完成可解释、可追踪的辅助管理闭环，而不是替代保质期标签、专业检测或食品安全结论。
+
+## 当前实现
+
 当前目标是在远程 `firecar-pi` 上部署可替换模型的边缘推理运行时。该设备实际为 NanoPC-T4，Ubuntu 20.04 ARM64，约 3.7 GiB 内存，无 NVIDIA GPU/CUDA/Docker，因此 VLM 默认采用 CPU-only 的 `llama.cpp` 多模态推理路线，YOLO 采用 ONNX Runtime CPU 推理路线。已额外尝试 Mali-T860 OpenCL runtime，但当前 `llama.cpp` OpenCL 后端会将 `Mali-T860` 判定为 unsupported，不能作为默认方案。
 
 当前本机 SSH alias `firecar-pi` 指向 `pi@192.168.1.115`，已用现有 SSH key 验证可登录 `NanoPC-T4`；浏览器访问智能冰箱 Web 面板使用 `http://192.168.1.115:8090/`。
@@ -524,6 +536,10 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 不把 sudo 密码、DeepSeek API key、Roboflow API key 或其他凭据写入 README、脚本、systemd unit 或 Git。
 
 ## 修改历史
+
+- `codex-vlm-inference-framework.0.12.1.202607221242`
+  - 新增面向比赛材料和项目答辩的项目背景，说明家庭食物浪费、食品存储管理和智能冰箱行业需求。
+  - 明确 YOLO、VLM、传感器、数据库和 Web 面板构成的项目切入点，以及系统仅提供辅助判断的能力边界。
 
 - `codex-vlm-inference-framework.0.12.0.202607102131`
   - 新增 ESP32-S3 串口环境采集模块和 `smart-fridge-sensor.service`，持续保存带时效标记的 v2 传感器快照。
