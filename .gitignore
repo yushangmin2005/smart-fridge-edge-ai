@@ -16,6 +16,7 @@ logs/
 run/
 runtime/
 tmp/
+artifacts/esp32-backups/
 *.pt
 *.onnx
 *.db

@@ -1,4 +1,4 @@
-# 智能消防巡检车边缘 AI 推理框架
+# 智能冰箱边缘 AI 管理系统
 
 ## 项目背景
 
@@ -14,7 +14,12 @@
 
 当前目标是在远程 `firecar-pi` 上部署可替换模型的边缘推理运行时。该设备实际为 NanoPC-T4，Ubuntu 20.04 ARM64，约 3.7 GiB 内存，无 NVIDIA GPU/CUDA/Docker，因此 VLM 默认采用 CPU-only 的 `llama.cpp` 多模态推理路线，YOLO 采用 ONNX Runtime CPU 推理路线。已额外尝试 Mali-T860 OpenCL runtime，但当前 `llama.cpp` OpenCL 后端会将 `Mali-T860` 判定为 unsupported，不能作为默认方案。
 
-当前本机 SSH alias `firecar-pi` 指向 `pi@192.168.1.115`，已用现有 SSH key 验证可登录 `NanoPC-T4`；浏览器访问智能冰箱 Web 面板使用 `http://192.168.1.115:8090/`。
+部署脚本默认使用 SSH alias `firecar-pi`。请在本机 `~/.ssh/config` 中将其映射到 NanoPC-T4 的实际地址，例如 `pi@<NANOPC_IP>`；智能冰箱 Web 面板默认地址为 `http://<NANOPC_IP>:8090/`。
+
+公开模型仓库：
+
+- VLM：[BeimingJingli/smart-fridge-qwen25vl-gguf](https://huggingface.co/BeimingJingli/smart-fridge-qwen25vl-gguf)
+- YOLO：[BeimingJingli/smart-fridge-yolo11n](https://huggingface.co/BeimingJingli/smart-fridge-yolo11n)
 
 ## 技术栈
 
@@ -32,6 +37,7 @@
 - 智能冰箱数据库：SQLite，板端默认路径为 `~/smart-fridge/data/fridge.sqlite3`
 - 智能冰箱调度：`ffmpeg` + v4l2 每 1 小时拍照一次，默认使用 `/dev/video10` UVC 摄像头
 - 环境传感器接入：Python 标准库 `termios/select` 持续读取 ESP32-S3 的 `115200 8N1` JSON Lines v2 数据，原子写入 `sensor_state.json`
+- ESP32-S3 烧录：macOS 使用 Arduino CLI + `esp32:esp32@2.0.17` 编译，NanoPC-T4/RK3399 使用隔离的 `esptool==4.5.1` 经 CP2102N 完成备份和 USB 烧录
 - 智能冰箱 Web 前端：Python 标准库 `http.server` + SQLite 只读查询，默认端口 `8090`
 - 智能冰箱自启动：`systemd --user` 管理传感器、VLM、Web、自动识别管线和维护定时器；`loginctl linger` 保持用户服务开机常驻
 - 智能冰箱维护：Python 标准库脚本定时清理临时图片、YOLO/VLM 输出和日志，并把异常提醒写入 `alerts.json` 供 Web 展示
@@ -126,6 +132,10 @@ ssh firecar-pi '~/smart-fridge/bin/start_sensor.sh'
 ssh firecar-pi '~/smart-fridge/bin/status_sensor.sh'
 ssh firecar-pi '~/smart-fridge/bin/stop_sensor.sh'
 
+# 编译传感器固件，并通过 RK3399 备份和烧录 ESP32-S3
+ESP32_FIRMWARE_DIR=/path/to/smart_fridge_sensor_node \
+  scripts/flash_esp32s3_via_rk3399.sh firecar-pi
+
 # 查看远端 Pi agent 版本
 ssh firecar-pi 'bash -lc "pi --version; piagent --version"'
 
@@ -174,6 +184,9 @@ YOLO 部署后，远程目录结构为：
   data/sensor_state.json # 已纠正门状态的最新传感器快照
   data/alerts.json
   data/backups/        # 手动备份库，默认不提交
+  firmware/backups/    # 每次烧录前的 8 MB ESP32 全闪存备份
+  firmware/releases/   # 已校验哈希的可重复烧录固件包
+  firmware/current     # 最近一次通过烧录和传感器验收的固件软链接
   logs/fridge-alerts.log
   logs/fridge-web.log
   logs/fridge-sensor.log
@@ -330,7 +343,7 @@ ssh firecar-pi '~/smart-fridge/bin/status_web.sh'
 浏览器访问：
 
 ```text
-http://192.168.1.115:8090/
+http://<NANOPC_IP>:8090/
 ```
 
 页面展示内容：
@@ -417,7 +430,7 @@ VLM_TIMEOUT=3600
 VLM_EXTRA_ARGS="--image-min-tokens 64 --image-max-tokens 64 --jinja"
 ```
 
-该模型包来自本机 `/Users/yushangmin/Desktop/smart_fridge_qwen25vl_gguf/`。远端磁盘在部署后剩余约 1.3 GiB；当前参数优先保证 NanoPC-T4 CPU-only 环境可启动。`VLM_TIMEOUT=3600` 将 `llama-server` 读写超时显式固定为 1 小时；发起图片推理的客户端也需要设置不低于 1 小时的 HTTP 超时。由于 YOLO 已经负责定位并裁剪新增区域，VLM 默认使用 `image-min-tokens=64`、`image-max-tokens=64` 做裁剪图语义识别；`llama.cpp` 对 Qwen-VL grounding 任务提示 `image-min-tokens=1024` 更适合精细定位，但会进一步增加内存占用与推理时间。
+该模型包可从公开的 [Hugging Face VLM 仓库](https://huggingface.co/BeimingJingli/smart-fridge-qwen25vl-gguf) 获取。远端磁盘在部署后剩余约 1.3 GiB；当前参数优先保证 NanoPC-T4 CPU-only 环境可启动。`VLM_TIMEOUT=3600` 将 `llama-server` 读写超时显式固定为 1 小时；发起图片推理的客户端也需要设置不低于 1 小时的 HTTP 超时。由于 YOLO 已经负责定位并裁剪新增区域，VLM 默认使用 `image-min-tokens=64`、`image-max-tokens=64` 做裁剪图语义识别；`llama.cpp` 对 Qwen-VL grounding 任务提示 `image-min-tokens=1024` 更适合精细定位，但会进一步增加内存占用与推理时间。
 
 启动、停止与状态检查：
 
@@ -502,7 +515,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 本地训练冒烟：`YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh`，需先准备公开数据集。
 - 本地导出检查：`scripts/export_yolo11n_onnx_local.sh`，需先完成训练并产生 `best.pt`。
 - 远程硬件检查：`scripts/remote_probe.sh firecar-pi`
-- 远程连接检查：`ssh firecar-pi 'hostname; whoami; ip -4 addr show wlan0'`，当前 `firecar-pi` 指向 `192.168.1.115`，登录用户为 `pi`，主机名为 `NanoPC-T4`。
+- 远程连接检查：`ssh firecar-pi 'hostname; whoami; ip -4 addr show wlan0'`，应返回登录用户 `pi` 和主机名 `NanoPC-T4`。
 - 远程运行时检查：`scripts/remote_runtime_check.sh firecar-pi`
 - OpenCL 实验检查：`scripts/deploy_llamacpp_opencl.sh firecar-pi`，默认输出 `opencl_runtime=...` 和 `activated=0`；当前 `llama-server --list-devices` 输出 `unsupported GPU 'Mali-T860'` 与空设备列表，不能切换为默认运行时。
 - 远程 YOLO 检查：`scripts/remote_yolo_check.sh firecar-pi`
@@ -510,6 +523,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 远程维护检查：`ssh firecar-pi '~/smart-fridge/bin/fridge_maintenance.sh run-all'`，当前 `alerts.alert_count=0`。
 - 远程自启动检查：`ssh firecar-pi 'systemctl --user is-active smart-fridge-vlm.service smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer'`，五项应均为 `active`。
 - 远程传感器检查：`ssh firecar-pi '~/smart-fridge/bin/fridge_sensor.sh --check'`，应返回 `fresh=true`，且当前设备上报 `closed/false` 时纠正字段为 `door_state=open`、`door_open=true`。
+- ESP32-S3 烧录脚本检查：`bash -n scripts/flash_esp32s3_via_rk3399.sh scripts/rk3399_flash_esp32s3.sh`；正式烧录必须依次通过本机构建、bundle SHA-256、ESP32-S3/8 MB 探测、烧录前全闪存备份、写入校验、传感器 v2 连续帧和服务恢复。
 - 远程管线检查：真实 `/dev/video10` 摄像头已通过 `ffmpeg -f v4l2` 拍出 640x360 JPEG；真实摄像头当前 YOLO 检测为 0；公开数据集样图远程 mock VLM 验证通过 `added=11 -> unchanged=11 -> removed=11`。
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
@@ -533,9 +547,24 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 不删除远程用户目录中与本项目无关的文件。
 - 不在未确认接线、pin mapping、总线地址和外设安全前启用 Pi board tools 的 GPIO/I2C 写操作。
 - `smart-fridge-sensor.service` 运行期间不再用 `cat/head` 等其他进程持续读取同一串口；串口数据由单一采集服务持有，网页和 AI 只读 `sensor_state.json`。
+- 不直接执行 `erase_flash`、eFuse 写入或跳过备份烧录；ESP32-S3 更新统一使用项目脚本，脚本会独占串口并在退出时恢复 `smart-fridge-sensor.service`。
 - 不把 sudo 密码、DeepSeek API key、Roboflow API key 或其他凭据写入 README、脚本、systemd unit 或 Git。
 
+## 开源许可
+
+本仓库源代码采用 [MIT License](LICENSE)。数据集、基础模型、微调模型和第三方依赖不属于该许可证授权范围，使用时需分别遵守其原始许可证和服务条款。
+
 ## 修改历史
+
+- `codex-vlm-inference-framework.0.14.0.202607222022`
+  - 为 GitHub 公开发布补充 MIT 许可证、公开模型链接和通用部署地址，移除个人电脑路径、固定局域网地址与 USB 设备序列号。
+  - ESP32-S3 烧录脚本改为自动发现唯一 CP2102N 串口，并让 esptool 根据已探测芯片自动设置 Flash 容量。
+  - 无论传感器服务原先是否运行，烧录后都必须通过连续 v2 帧验收，再恢复原服务状态并更新当前固件链接。
+
+- `codex-vlm-inference-framework.0.13.0.202607211501`
+  - 新增 macOS 编译、RK3399 USB 烧录链路，固定使用 Arduino ESP32 2.0.17 与匹配的 `esptool 4.5.1`。
+  - 板端烧录前验证 bundle SHA-256、芯片型号和 8 MB Flash，并自动保存完整 Flash 备份；禁止擦除 Flash 或写 eFuse。
+  - 烧录期间自动停止串口采集服务，退出时恢复服务；写入完成后要求 ESP32-S3 连续输出递增的 JSON Lines v2 帧才更新当前固件链接。
 
 - `codex-vlm-inference-framework.0.12.1.202607221242`
   - 新增面向比赛材料和项目答辩的项目背景，说明家庭食物浪费、食品存储管理和智能冰箱行业需求。
@@ -679,8 +708,8 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
   - 远端已备份并清空测试库，当前 `foods=0`、`food_observations=0`、`food_events=0`，维护检查 `alert_count=0`。
 
 - `codex-vlm-inference-framework.0.11.1.202607061039`
-  - 更新当前 `firecar-pi` 连接地址为 `192.168.1.115`，本机 `~/.ssh/config` 已同步并验证 `ssh firecar-pi` 可登录 `NanoPC-T4`。
-  - Web 状态面板访问地址更新为 `http://192.168.1.115:8090/`，`/api/overview` 已验证可访问。
+  - 更新当时的 `firecar-pi` DHCP 地址，本机 `~/.ssh/config` 已同步并验证 `ssh firecar-pi` 可登录 `NanoPC-T4`。
+  - Web 状态面板通过 NanoPC-T4 的 `8090` 端口提供服务，`/api/overview` 已验证可访问。
   - 记录远端 `timedatectl` 当前未完成系统时间同步，避免误判照片年龄和下次识别时间。
 
 - `codex-vlm-inference-framework.0.11.2.202607061045`
