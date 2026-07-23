@@ -211,6 +211,49 @@ class YoloChangeCandidateTests(unittest.TestCase):
         self.assertEqual(fallback["confidence"], 0.0)
         self.assertEqual(fallback["identification_status"], "pending_vlm")
 
+    def test_invalid_vlm_enum_values_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "freshness must be one of"):
+            fridge_pipeline.normalize_vlm_result(
+                {
+                    "is_food": True,
+                    "food_name": "大白菜",
+                    "category": "vegetable",
+                    "composition": ["叶菜"],
+                    "freshness": "attention|danger|unknown",
+                    "risk_level": "normal",
+                }
+            )
+
+    def test_invalid_vlm_name_option_list_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "invalid option separator"):
+            fridge_pipeline.normalize_vlm_result(
+                {
+                    "is_food": True,
+                    "food_name": "大白菜|n缨菜",
+                    "category": "vegetable",
+                    "composition": ["叶菜"],
+                    "freshness": "attention",
+                    "risk_level": "normal",
+                }
+            )
+
+    def test_vlm_response_schema_constrains_semantic_fields(self):
+        schema = fridge_pipeline.VLM_RESPONSE_SCHEMA
+
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            schema["properties"]["freshness"]["enum"],
+            list(fridge_pipeline.VLM_STATE_VALUES),
+        )
+        self.assertEqual(
+            schema["properties"]["risk_level"]["enum"],
+            list(fridge_pipeline.VLM_STATE_VALUES),
+        )
+        self.assertEqual(
+            schema["properties"]["category"]["enum"],
+            list(fridge_pipeline.VLM_CATEGORY_VALUES),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -325,6 +325,7 @@ SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE=16
 SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR=0
 SMART_FRIDGE_VLM_URL=http://127.0.0.1:8080/v1/chat/completions
 SMART_FRIDGE_VLM_TIMEOUT=3600
+SMART_FRIDGE_VLM_USE_RESPONSE_FORMAT=1
 SMART_FRIDGE_CLOUD_ADVICE_ENABLED=1
 SMART_FRIDGE_CLOUD_ADVICE_MODEL=deepseek-v4-flash
 SMART_FRIDGE_CLOUD_ADVICE_AUTH_PATH=/home/pi/.pi/agent/auth.json
@@ -336,7 +337,7 @@ SMART_FRIDGE_SENSOR_DOOR_INVERTED=1
 
 `SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR=0` 表示 VLM 超时或失败时不写入食物数据库，候选会在下一轮重新分析。即使人工开启旧的容错写入，记录也只能标记为待确认的 `unknown_food`，不能沿用 YOLO 类别。
 
-VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。提示词明确要求忽略 YOLO 类别的语义暗示，并根据图片独立识别食物；新鲜度和储存建议可参考带时间戳的温湿度、探头和实际门状态，过期数据或估算探头值不能作为确定性结论。
+VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。提示词明确要求忽略 YOLO 类别的语义暗示，并根据图片独立识别食物；新鲜度和储存建议可参考带时间戳的温湿度、探头和实际门状态，过期数据或估算探头值不能作为确定性结论。正式请求按照 [llama-server 文档](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) 通过 `response_format.schema` 约束字段类型和枚举，客户端还会拒绝带选项分隔符的名称或不合法枚举；校验失败时不写 SQLite。
 
 每轮自动识别完成后，管线会把当前 `active_objects`、本轮新增/未变/移除摘要、下次识别时间和最新传感器快照发送给 DeepSeek 云端模型，要求返回 JSON：`summary`、`risk_level`、`action_items`、`item_suggestions`、`next_check`。结果写入 `~/smart-fridge/data/pipeline_state.json` 的 `cloud_advice` 字段，并由 Web 面板展示。DeepSeek API key 默认从远端 Pi agent 的 `~/.pi/agent/auth.json` 读取，不写入项目仓库。
 
@@ -519,7 +520,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 自动管线语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_pipeline.py`
 - 环境采集与 Web 语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_sensor.py smart_fridge_runtime/fridge_web.py`
 - 维护脚本语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_maintenance.py`
-- 单元测试：`python3 -m unittest discover -s tests -v`，必须覆盖门状态双向取反、数据时效、VLM/DeepSeek 请求载荷、Web API 字段、低阈值变化候选、类别无关匹配、视觉内容变化和背景候选抑制。
+- 单元测试：`python3 -m unittest discover -s tests -v`，必须覆盖门状态双向取反、数据时效、VLM/DeepSeek 请求载荷、Web API 字段、低阈值变化候选、类别无关匹配、视觉内容变化、背景候选抑制和非法 VLM 结果拒绝。
 - 本地 SQLite 冒烟：使用临时目录执行 `fridge_db.py init/ingest/list-foods/show-food/health`，完成后删除临时库。
 - 本地管线差分冒烟：使用假 YOLO 与 mock VLM 执行三轮 `added -> unchanged -> removed`，并检查 24 张临时图保留。
 - 本地训练配置检查：`cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env && scripts/setup_yolo_training_local.sh`
@@ -566,6 +567,13 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 本仓库源代码采用 [MIT License](LICENSE)。数据集、基础模型、微调模型和第三方依赖不属于该许可证授权范围，使用时需分别遵守其原始许可证和服务条款。
 
 ## 修改历史
+
+- `main.0.15.1.202607231928`
+  - 为 VLM 响应增加 llama-server JSON Schema，严格约束字段类型、类别及状态枚举。
+  - 客户端新增二次语义校验，拒绝带选项分隔符的食物名称和非法枚举，校验失败时不写 SQLite。
+  - 重写 VLM JSON 示例，避免模型把 `normal|attention|danger|unknown` 等选项列表原样复制到结果。
+  - 新增 3 项 VLM 输出校验测试，本地共 16 项单元测试。
+  - 将异常测试记录保留为审计事件并移出活跃状态；RK3399 使用真实照片复测后输出 `food_name=小白菜`、`freshness=normal`、`risk_level=normal`、`confidence=0.8`，合法结果写入 SQLite。
 
 - `main.0.15.0.202607231356`
   - 将 YOLO 明确调整为低阈值变化候选和区域定位层，类别与置信度不再作为食物身份结论；VLM 独立负责是否为食物、具体名称和可见状态。

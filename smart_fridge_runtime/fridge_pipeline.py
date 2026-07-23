@@ -25,6 +25,55 @@ Required keys: is_food, food_name, category, composition, freshness, freshness_s
 visible_state, storage_advice, risk_level, confidence, notes.
 YOLO only located a possible scene change. Its label is not identity evidence."""
 
+VLM_CATEGORY_VALUES = (
+    "vegetable",
+    "fruit",
+    "meat",
+    "seafood",
+    "dairy",
+    "drink",
+    "packaged_food",
+    "leftover",
+    "condiment",
+    "other",
+    "unknown",
+)
+VLM_STATE_VALUES = ("normal", "attention", "danger", "unknown")
+VLM_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_food": {"type": "boolean"},
+        "food_name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "category": {"type": "string", "enum": list(VLM_CATEGORY_VALUES)},
+        "composition": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 12,
+        },
+        "freshness": {"type": "string", "enum": list(VLM_STATE_VALUES)},
+        "freshness_score": {"type": "number", "minimum": 0, "maximum": 1},
+        "visible_state": {"type": "string", "maxLength": 300},
+        "storage_advice": {"type": "string", "maxLength": 300},
+        "risk_level": {"type": "string", "enum": list(VLM_STATE_VALUES)},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "notes": {"type": "string", "maxLength": 400},
+    },
+    "required": [
+        "is_food",
+        "food_name",
+        "category",
+        "composition",
+        "freshness",
+        "freshness_score",
+        "visible_state",
+        "storage_advice",
+        "risk_level",
+        "confidence",
+        "notes",
+    ],
+    "additionalProperties": False,
+}
+
 CLOUD_ADVICE_PROMPT = """你是智能冰箱的云端综合建议模型。你会收到当前仍然活跃的食物对象、
 本轮新增/移除/未变信息、基础运行状态和 ESP32-S3 环境传感器快照。请综合温度、湿度、
 门状态和数据时效性进行判断；探头温度标记为估算值时只能作为趋势参考。门状态已经纠正为
@@ -675,6 +724,8 @@ def request_cloud_advice(active_objects, cycle_summary, sensor_context=None):
 
 
 def normalize_vlm_result(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("VLM result must be a JSON object")
     result = dict(payload or {})
     result.setdefault("is_food", True)
     result.setdefault("food_name", result.get("name") or "unknown_food")
@@ -687,8 +738,37 @@ def normalize_vlm_result(payload):
     result.setdefault("risk_level", result.get("advice_label") or "unknown")
     result.setdefault("confidence", 0.0)
     result.setdefault("notes", "")
+    if not isinstance(result["is_food"], bool):
+        raise ValueError("VLM field is_food must be a boolean")
+    if not isinstance(result["food_name"], str):
+        raise ValueError("VLM field food_name must be a string")
+    result["food_name"] = result["food_name"].strip()
+    if not result["is_food"]:
+        result["food_name"] = "unknown_food"
+    elif not result["food_name"] or result["food_name"] == "unknown_food":
+        raise ValueError("VLM food result must contain an identified food_name")
+    if any(character in result["food_name"] for character in ("|", "\r", "\n")):
+        raise ValueError("VLM food_name contains an invalid option separator")
+    for field, allowed in (
+        ("category", VLM_CATEGORY_VALUES),
+        ("freshness", VLM_STATE_VALUES),
+        ("risk_level", VLM_STATE_VALUES),
+    ):
+        if result[field] not in allowed:
+            raise ValueError(
+                "VLM field {0} must be one of {1}, got {2!r}".format(
+                    field,
+                    ", ".join(allowed),
+                    result[field],
+                )
+            )
     if not isinstance(result.get("composition"), list):
         result["composition"] = [str(result["composition"])]
+    if not all(isinstance(item, str) for item in result["composition"]):
+        raise ValueError("VLM field composition must contain only strings")
+    for field in ("visible_state", "storage_advice", "notes"):
+        if not isinstance(result[field], str):
+            raise ValueError("VLM field {0} must be a string".format(field))
     for key in ("freshness_score", "confidence"):
         try:
             result[key] = max(0.0, min(1.0, float(result[key])))
@@ -757,8 +837,17 @@ def call_vlm(crop_path, yolo_detection, raw_response_path=None, raw_text_path=No
         "temperature": 0,
         "max_tokens": env_int("SMART_FRIDGE_VLM_MAX_TOKENS", 512),
     }
-    if env_bool("SMART_FRIDGE_VLM_USE_RESPONSE_FORMAT", False):
-        attempts = [dict(base_payload, response_format={"type": "json_object"}), base_payload]
+    if env_bool("SMART_FRIDGE_VLM_USE_RESPONSE_FORMAT", True):
+        attempts = [
+            dict(
+                base_payload,
+                response_format={
+                    "type": "json_object",
+                    "schema": VLM_RESPONSE_SCHEMA,
+                },
+            ),
+            base_payload,
+        ]
     else:
         attempts = [base_payload]
     last_error = None
