@@ -20,9 +20,10 @@ from pathlib import Path
 from fridge_sensor import read_sensor_state, sensor_ai_context
 
 
-DEFAULT_PROMPT = """Return exactly one JSON object for the visible food crop.
+DEFAULT_PROMPT = """Return exactly one JSON object for the visible refrigerator crop.
 Required keys: is_food, food_name, category, composition, freshness, freshness_score,
-visible_state, storage_advice, risk_level, confidence, notes."""
+visible_state, storage_advice, risk_level, confidence, notes.
+YOLO only located a possible scene change. Its label is not identity evidence."""
 
 CLOUD_ADVICE_PROMPT = """你是智能冰箱的云端综合建议模型。你会收到当前仍然活跃的食物对象、
 本轮新增/移除/未变信息、基础运行状态和 ESP32-S3 环境传感器快照。请综合温度、湿度、
@@ -251,30 +252,130 @@ def box_iou(left, right):
     return inter / union
 
 
-def match_detections(previous_objects, detections, threshold):
+def detection_crop_box(detection, width, height, pad_ratio=0.0):
+    box = detection.get("box") or {}
+    x1 = float(box.get("x1", 0))
+    y1 = float(box.get("y1", 0))
+    x2 = float(box.get("x2", width))
+    y2 = float(box.get("y2", height))
+    pad_x = max(0.0, x2 - x1) * pad_ratio
+    pad_y = max(0.0, y2 - y1) * pad_ratio
+    crop_box = (
+        max(0, int(math.floor(x1 - pad_x))),
+        max(0, int(math.floor(y1 - pad_y))),
+        min(width, int(math.ceil(x2 + pad_x))),
+        min(height, int(math.ceil(y2 + pad_y))),
+    )
+    if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
+        return None
+    return crop_box
+
+
+def image_difference_hash(image):
+    from PIL import Image
+
+    resampling = getattr(Image, "Resampling", Image)
+    resized = image.convert("L").resize((9, 8), resampling.BILINEAR)
+    if hasattr(resized, "get_flattened_data"):
+        pixels = list(resized.get_flattened_data())
+    else:
+        pixels = list(resized.getdata())
+    value = 0
+    for row in range(8):
+        row_offset = row * 9
+        for column in range(8):
+            value = (value << 1) | int(
+                pixels[row_offset + column] > pixels[row_offset + column + 1]
+            )
+    return "{0:016x}".format(value)
+
+
+def add_change_fingerprints(image_path, detections):
+    from PIL import Image
+
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
+        width, height = image.size
+        enriched = []
+        for detection in detections:
+            item = dict(detection)
+            crop_box = detection_crop_box(item, width, height)
+            if crop_box is not None:
+                item["change_fingerprint"] = image_difference_hash(image.crop(crop_box))
+            enriched.append(item)
+    return enriched
+
+
+def fingerprint_distance(left, right):
+    left_value = (left or {}).get("change_fingerprint")
+    right_value = (right or {}).get("change_fingerprint")
+    if not left_value or not right_value:
+        return None
+    try:
+        return bin(int(left_value, 16) ^ int(right_value, 16)).count("1")
+    except (TypeError, ValueError):
+        return None
+
+
+def match_detections(previous_objects, detections, threshold, max_hash_distance=16):
     matches = {}
     used_previous = set()
     for index, detection in enumerate(detections):
-        label = str(detection.get("class_name", ""))
         box = detection.get("box") or {}
         best_prev = None
         best_score = 0.0
+        best_hash_distance = None
         for prev_index, previous in enumerate(previous_objects):
             if prev_index in used_previous:
                 continue
-            if str(previous.get("yolo_label", "")) != label:
-                continue
             previous_box = previous.get("box") or {}
             score = box_iou(box, previous_box)
+            if score < threshold:
+                continue
+            hash_distance = fingerprint_distance(previous, detection)
+            if hash_distance is not None and hash_distance > max_hash_distance:
+                continue
             if score > best_score:
                 best_score = score
                 best_prev = prev_index
-        if best_prev is not None and best_score >= threshold:
-            matches[index] = (best_prev, best_score)
+                best_hash_distance = hash_distance
+        if best_prev is not None:
+            matches[index] = (best_prev, best_score, best_hash_distance)
             used_previous.add(best_prev)
     removed = [index for index in range(len(previous_objects)) if index not in used_previous]
     added = [index for index in range(len(detections)) if index not in matches]
     return matches, added, removed
+
+
+def select_yolo_change_candidates(payload):
+    result = dict(payload or {})
+    raw_detections = result.get("raw_detections")
+    if raw_detections is None:
+        raw_detections = result.get("detections") or []
+    legacy_threshold = env_float("SMART_FRIDGE_YOLO_MIN_CONFIDENCE", 0.45)
+    min_confidence = env_float(
+        "SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE", legacy_threshold
+    )
+    candidates = []
+    for detection in raw_detections:
+        try:
+            confidence = float(detection.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence >= min_confidence:
+            candidates.append(detection)
+    result.update(
+        {
+            "raw_detections": raw_detections,
+            "detections": candidates,
+            "pipeline_role": "change_candidates",
+            "pipeline_semantic_authority": "vlm",
+            "pipeline_change_min_confidence": min_confidence,
+            "pipeline_candidate_count": len(candidates),
+            "pipeline_filtered_count": len(raw_detections) - len(candidates),
+        }
+    )
+    return result, candidates
 
 
 def run_yolo(image_path, output_json_path):
@@ -286,29 +387,24 @@ def run_yolo(image_path, output_json_path):
             payload = read_json(mock_yolo, {})
         payload = dict(payload or {})
         payload.setdefault("image", image_path)
-        write_json(output_json_path, payload)
-        return payload, payload.get("detections") or []
+    else:
+        yolo_bin = shlex.split(
+            env(
+                "SMART_FRIDGE_YOLO_BIN",
+                "/home/pi/yolo-inference/bin/yolo_detect.sh",
+            )
+        )
+        command = yolo_bin + [
+            "--image",
+            image_path,
+            "--output-json",
+            output_json_path,
+        ]
+        run_command(command, timeout=env_int("SMART_FRIDGE_YOLO_TIMEOUT", 300))
+        payload = read_json(output_json_path, {})
 
-    yolo_bin = shlex.split(env("SMART_FRIDGE_YOLO_BIN", "/home/pi/yolo-inference/bin/yolo_detect.sh"))
-    command = yolo_bin + ["--image", image_path, "--output-json", output_json_path]
-    run_command(command, timeout=env_int("SMART_FRIDGE_YOLO_TIMEOUT", 300))
-    payload = read_json(output_json_path, {})
-    raw_detections = payload.get("detections") or []
-    min_confidence = env_float("SMART_FRIDGE_YOLO_MIN_CONFIDENCE", 0.0)
-    detections = []
-    for detection in raw_detections:
-        try:
-            confidence = float(detection.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-        if confidence >= min_confidence:
-            detections.append(detection)
-    if len(detections) != len(raw_detections):
-        payload["raw_detections"] = raw_detections
-        payload["detections"] = detections
-        payload["pipeline_min_confidence"] = min_confidence
-        payload["pipeline_filtered_count"] = len(raw_detections) - len(detections)
-        write_json(output_json_path, payload)
+    payload, detections = select_yolo_change_candidates(payload)
+    write_json(output_json_path, payload)
     return payload, detections
 
 
@@ -317,20 +413,10 @@ def crop_detection(image_path, detection, crop_path):
 
     image = Image.open(image_path).convert("RGB")
     width, height = image.size
-    box = detection.get("box") or {}
-    x1 = float(box.get("x1", 0))
-    y1 = float(box.get("y1", 0))
-    x2 = float(box.get("x2", width))
-    y2 = float(box.get("y2", height))
     pad_ratio = env_float("SMART_FRIDGE_CROP_PADDING", 0.08)
-    pad_x = (x2 - x1) * pad_ratio
-    pad_y = (y2 - y1) * pad_ratio
-    crop_box = (
-        max(0, int(math.floor(x1 - pad_x))),
-        max(0, int(math.floor(y1 - pad_y))),
-        min(width, int(math.ceil(x2 + pad_x))),
-        min(height, int(math.ceil(y2 + pad_y))),
-    )
+    crop_box = detection_crop_box(detection, width, height, pad_ratio)
+    if crop_box is None:
+        raise ValueError("YOLO change candidate has an empty crop")
     crop = image.crop(crop_box)
     target = Path(crop_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -629,7 +715,10 @@ def build_vlm_user_text(yolo_detection, sensor_context):
         "yolo_box": yolo_detection.get("box"),
     }
     return (
-        "Analyze this cropped refrigerator image. YOLO candidate:\n"
+        "Analyze this cropped refrigerator image. YOLO only located a possible "
+        "scene change; its class label and confidence are routing metadata, not "
+        "food identity evidence. Decide whether this is food and identify it "
+        "independently from the pixels. YOLO change candidate:\n"
         + json.dumps(yolo_hint, ensure_ascii=False)
         + "\nRefrigerator sensor snapshot (door_state and door_open are corrected physical values):\n"
         + json.dumps(sensor_context or load_sensor_context(), ensure_ascii=False)
@@ -702,19 +791,20 @@ def call_vlm(crop_path, yolo_detection, raw_response_path=None, raw_text_path=No
 
 
 def fallback_vlm_result(detection, error):
-    label = detection.get("class_name") or "unknown_food"
+    routing_label = detection.get("class_name") or "unknown"
     return {
         "is_food": True,
-        "food_name": label,
+        "food_name": "unknown_food",
         "category": "unknown",
-        "composition": [label],
+        "composition": [],
         "freshness": "unknown",
         "freshness_score": 0.0,
-        "visible_state": "VLM 分析失败，暂按 YOLO 候选记录。",
+        "visible_state": "VLM 分析失败，当前候选尚未完成内容识别。",
         "storage_advice": "需要重新拍照或人工确认。",
         "risk_level": "unknown",
-        "confidence": float(detection.get("confidence") or 0.0),
-        "notes": "VLM error: {0}".format(error),
+        "confidence": 0.0,
+        "identification_status": "pending_vlm",
+        "notes": "VLM error: {0}; YOLO routing label: {1}".format(error, routing_label),
     }
 
 
@@ -741,7 +831,7 @@ def ingest_added_detection(image_path, yolo_json_path, detection_index, detectio
         "--vlm-json",
         vlm_json_path,
         "--canonical-name",
-        str(vlm_result.get("food_name") or detection.get("class_name") or "unknown_food"),
+        str(vlm_result.get("food_name") or "unknown_food"),
         "--vlm-name",
         str(vlm_result.get("food_name") or ""),
         "--vlm-state",
@@ -804,6 +894,86 @@ def build_paths(root, timestamp):
     }
 
 
+def suppress_known_rejections(
+    previous_rejections,
+    detections,
+    candidate_indexes,
+    iou_threshold,
+    max_hash_distance,
+    now,
+    image_path,
+):
+    candidates = [detections[index] for index in candidate_indexes]
+    matches, new_candidate_indexes, _ = match_detections(
+        previous_rejections,
+        candidates,
+        iou_threshold,
+        max_hash_distance,
+    )
+    current_rejections = []
+    suppressed = []
+    for candidate_index, (
+        previous_index,
+        score,
+        hash_distance,
+    ) in sorted(matches.items()):
+        detection_index = candidate_indexes[candidate_index]
+        detection = detections[detection_index]
+        previous = dict(previous_rejections[previous_index])
+        previous.update(
+            {
+                "yolo_label": detection.get("class_name"),
+                "confidence": detection.get("confidence"),
+                "box": detection.get("box"),
+                "change_fingerprint": detection.get("change_fingerprint"),
+                "last_seen_at": now,
+                "image_ref": image_path,
+                "match_iou": round(score, 6),
+                "fingerprint_distance": hash_distance,
+            }
+        )
+        current_rejections.append(previous)
+        suppressed.append(
+            {
+                "detection_index": detection_index,
+                "reason": "known_vlm_non_food",
+                "yolo_label": detection.get("class_name"),
+                "match_iou": round(score, 6),
+                "fingerprint_distance": hash_distance,
+            }
+        )
+    new_indexes = [
+        candidate_indexes[candidate_index]
+        for candidate_index in new_candidate_indexes
+    ]
+    return current_rejections, suppressed, new_indexes
+
+
+def rejected_candidate_from_detection(
+    detection,
+    detection_index,
+    now,
+    image_path,
+    vlm_json_path,
+    vlm_response_path,
+    vlm_raw_text_path,
+):
+    return {
+        "detection_index": detection_index,
+        "reason": "vlm_is_food_false",
+        "yolo_label": detection.get("class_name"),
+        "confidence": detection.get("confidence"),
+        "box": detection.get("box"),
+        "change_fingerprint": detection.get("change_fingerprint"),
+        "first_seen_at": now,
+        "last_seen_at": now,
+        "image_ref": image_path,
+        "vlm_json": str(vlm_json_path),
+        "vlm_response_json": vlm_response_path,
+        "vlm_raw_text": vlm_raw_text_path,
+    }
+
+
 def run_once(args):
     root = Path(env("SMART_FRIDGE_ROOT", str(Path(__file__).resolve().parents[1])))
     state_path = Path(env("SMART_FRIDGE_STATE_PATH", str(root / "data" / "pipeline_state.json")))
@@ -821,22 +991,43 @@ def run_once(args):
     prune_files(paths["crop_dir"], ["*.jpg", "*.jpeg", "*.png"], keep * env_int("SMART_FRIDGE_MAX_CROPS_PER_IMAGE", 8))
 
     yolo_payload, detections = run_yolo(image_path, str(paths["yolo_json"]))
+    detections = add_change_fingerprints(image_path, detections)
+    yolo_payload["detections"] = detections
+    write_json(paths["yolo_json"], yolo_payload)
+
     previous_state = read_json(state_path, {"active_objects": []}) or {"active_objects": []}
     previous_objects = previous_state.get("active_objects") or []
+    previous_rejections = previous_state.get("rejected_candidates") or []
+    match_iou = env_float("SMART_FRIDGE_MATCH_IOU", 0.35)
+    max_hash_distance = env_int("SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE", 16)
     matches, added_indexes, removed_indexes = match_detections(
         previous_objects,
         detections,
-        env_float("SMART_FRIDGE_MATCH_IOU", 0.35),
+        match_iou,
+        max_hash_distance,
     )
 
     now = utc_now()
+    current_rejections, suppressed, added_indexes = suppress_known_rejections(
+        previous_rejections,
+        detections,
+        added_indexes,
+        match_iou,
+        max_hash_distance,
+        now,
+        image_path,
+    )
     current_objects = []
     unchanged = []
     added = []
     removed = []
     errors = []
 
-    for detection_index, (previous_index, score) in sorted(matches.items()):
+    for detection_index, (
+        previous_index,
+        score,
+        hash_distance,
+    ) in sorted(matches.items()):
         detection = detections[detection_index]
         previous = dict(previous_objects[previous_index])
         previous.update(
@@ -844,13 +1035,23 @@ def run_once(args):
                 "yolo_label": detection.get("class_name"),
                 "confidence": detection.get("confidence"),
                 "box": detection.get("box"),
+                "change_fingerprint": detection.get("change_fingerprint"),
                 "last_seen_at": now,
                 "image_ref": image_path,
                 "match_iou": round(score, 6),
+                "fingerprint_distance": hash_distance,
             }
         )
         current_objects.append(previous)
-        unchanged.append({"food_id": previous.get("food_id"), "yolo_label": previous.get("yolo_label"), "match_iou": score})
+        unchanged.append(
+            {
+                "food_id": previous.get("food_id"),
+                "food_name": (previous.get("vlm") or {}).get("food_name"),
+                "yolo_label": previous.get("yolo_label"),
+                "match_iou": round(score, 6),
+                "fingerprint_distance": hash_distance,
+            }
+        )
 
     for detection_index in added_indexes:
         detection = detections[detection_index]
@@ -869,7 +1070,7 @@ def run_once(args):
                 sensor_context=vlm_sensor_context,
             )
         except Exception as exc:
-            if env_bool("SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR", True):
+            if env_bool("SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR", False):
                 vlm_result = fallback_vlm_result(detection, str(exc))
                 write_json(vlm_json_path, vlm_result)
                 errors.append(
@@ -897,6 +1098,17 @@ def run_once(args):
                 continue
         write_json(vlm_json_path, vlm_result)
         if vlm_result.get("is_food") is False:
+            current_rejections.append(
+                rejected_candidate_from_detection(
+                    detection,
+                    detection_index,
+                    now,
+                    image_path,
+                    vlm_json_path,
+                    vlm_response_path,
+                    vlm_raw_text_path,
+                )
+            )
             added.append(
                 {
                     "detection_index": detection_index,
@@ -924,6 +1136,7 @@ def run_once(args):
             "yolo_label": detection.get("class_name"),
             "confidence": detection.get("confidence"),
             "box": detection.get("box"),
+            "change_fingerprint": detection.get("change_fingerprint"),
             "crop_box": crop_box,
             "image_ref": image_path,
             "crop_ref": crop_path,
@@ -965,9 +1178,12 @@ def run_once(args):
         "image_ref": image_path,
         "yolo_json": str(paths["yolo_json"]),
         "detections": len(detections),
+        "yolo_role": "change_candidates",
         "unchanged": unchanged,
         "added": added,
         "removed": removed,
+        "suppressed_candidates": suppressed,
+        "rejected_candidate_count": len(current_rejections),
         "active_count": len(current_objects),
         "deleted_captures": deleted_captures,
         "state_path": str(state_path),
@@ -979,6 +1195,7 @@ def run_once(args):
         "last_image_ref": image_path,
         "last_yolo_json": str(paths["yolo_json"]),
         "active_objects": current_objects,
+        "rejected_candidates": current_rejections,
         "last_cycle": summary,
     }
     write_json(state_path, state)

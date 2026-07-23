@@ -8,7 +8,7 @@
 
 这类需求不能只靠一次图像识别解决。系统既要知道“当前有什么”，也要理解食材何时出现、是否重复入库、外观状态如何变化，并结合温度、湿度、门状态、存放时长和历史记录持续判断。若所有图片都直接上传云端处理，还会受到网络稳定性、响应时间、服务成本和家庭图像隐私等因素制约，因此需要在低功耗边缘设备上建立可离线运行、云端能力可选接入的识别链路。
 
-基于上述问题，本项目以普通冰箱的低成本智能化改造为场景，使用 ESP32-S3 采集环境和门状态，以 RK3399 作为边缘计算节点：YOLO 负责快速预识别、变化触发和重复候选标记，VLM 负责食物名称与可见状态分析，规则和大模型再融合传感器数据、库存 ID 与历史状态形成提醒和建议；结果写入 SQLite，并通过中文 Web 面板展示库存、环境和状态变化。项目目标是完成可解释、可追踪的辅助管理闭环，而不是替代保质期标签、专业检测或食品安全结论。
+基于上述问题，本项目以普通冰箱的低成本智能化改造为场景，使用 ESP32-S3 采集环境和门状态，以 RK3399 作为边缘计算节点：YOLO 只负责变化定位和候选区域生成，VLM 负责食物名称与可见状态分析，规则和大模型再融合传感器数据、库存 ID 与历史状态形成提醒和建议；结果写入 SQLite，并通过中文 Web 面板展示库存、环境和状态变化。项目目标是完成可解释、可追踪的辅助管理闭环，而不是替代保质期标签、专业检测或食品安全结论。
 
 ## 当前实现
 
@@ -276,7 +276,7 @@ SMART_FRIDGE_PI_TOOLS_ALLOW_I2C_WRITE=1
 
 ## 智能冰箱识别链路
 
-当前智能冰箱采用混合识别架构：YOLO 负责预识别、入库提醒和重复候选标记；`llama.cpp` 承载的 VLM 主识别服务负责输出食物名称、食物状态评估，并将结构化结果写入数据库。最终判断与建议由数据库中同一食物 ID 的历史内容、最新视觉状态、存放时间和规则层共同生成。
+当前智能冰箱采用混合识别架构：YOLO 负责低成本地发现变化并生成候选区域；`llama.cpp` 承载的 VLM 主识别服务负责判断候选是否为食物、输出食物名称和状态，并将确认后的结构化结果写入数据库。最终判断与建议由数据库中同一食物 ID 的历史内容、最新视觉状态、存放时间和规则层共同生成。
 
 详细职责边界见 [docs/smart-fridge-hybrid-pipeline.md](docs/smart-fridge-hybrid-pipeline.md)。
 
@@ -301,12 +301,17 @@ SMART_FRIDGE_SENSOR_READ_TIMEOUT_SECONDS=10
 板端自动链路由 `~/smart-fridge/bin/fridge_pipeline.sh` 执行单轮识别，`~/smart-fridge/bin/start_pipeline.sh` 启动后台循环。默认每 3600 秒执行一次：
 
 ```text
-摄像头拍照 -> 保留最近 24 张临时图 -> YOLO 检测 -> 与上一轮状态做 IoU 匹配
+摄像头拍照 -> 保留最近 24 张临时图 -> YOLO 生成低阈值变化候选框
+  -> 用类别无关 IoU + 视觉指纹与上一轮状态匹配
   -> unchanged 维持原 food_id，不重复调用 VLM
-  -> added 裁剪新增框，与最新环境快照一起发送给 llama.cpp VLM，再写 SQLite
+  -> suppressed 跳过此前已被 VLM 判定为非食物且画面未变的背景候选
+  -> added 裁剪真正新增/变化的框，与最新环境快照一起发送给 llama.cpp VLM
+  -> VLM 独立判断是否为食物、具体名称和可见状态；确认是食物后写 SQLite
   -> removed 写入 food.removed 事件，并从当前 active state 移除
   -> 本轮结束后将 active objects、变化摘要和最新环境快照发送给 DeepSeek
 ```
+
+YOLO 在该链路中只承担变化定位和候选区域生成，其类别与置信度仅作为调试和路由元数据，不作为最终食物名称。VLM 是食物身份和可见状态的语义判断来源。为兼顾召回率与 RK3399 的慢速 VLM，管线以较低阈值接收候选，再用 64 位视觉指纹抑制未变化对象和重复背景；同一位置的像素内容发生明显变化时会重新进入 VLM。
 
 关键配置在远程 `~/smart-fridge/config/smart_fridge.env`：
 
@@ -315,7 +320,9 @@ SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS=3600
 SMART_FRIDGE_CAPTURE_KEEP=24
 SMART_FRIDGE_CAMERA_DEVICE=/dev/video10
 SMART_FRIDGE_YOLO_BIN=/home/pi/yolo-inference/bin/yolo_detect.sh
-SMART_FRIDGE_YOLO_MIN_CONFIDENCE=0.65
+SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE=0.45
+SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE=16
+SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR=0
 SMART_FRIDGE_VLM_URL=http://127.0.0.1:8080/v1/chat/completions
 SMART_FRIDGE_VLM_TIMEOUT=3600
 SMART_FRIDGE_CLOUD_ADVICE_ENABLED=1
@@ -325,7 +332,11 @@ SMART_FRIDGE_SENSOR_STATE_PATH=/home/pi/smart-fridge/data/sensor_state.json
 SMART_FRIDGE_SENSOR_DOOR_INVERTED=1
 ```
 
-VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。食物身份仍以图片为准；新鲜度和储存建议可参考带时间戳的温湿度、探头和实际门状态，过期数据或估算探头值不能作为确定性结论。
+`SMART_FRIDGE_YOLO_MIN_CONFIDENCE` 仅保留为旧部署兼容回退；配置了 `SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE` 后，管线不再使用旧的 `0.65` 语义过滤阈值。
+
+`SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR=0` 表示 VLM 超时或失败时不写入食物数据库，候选会在下一轮重新分析。即使人工开启旧的容错写入，记录也只能标记为待确认的 `unknown_food`，不能沿用 YOLO 类别。
+
+VLM prompt 位于 `~/smart-fridge/runtime/vlm_food_prompt.txt`，要求只输出 JSON，字段包含 `food_name`、`category`、`composition`、`freshness`、`freshness_score`、`visible_state`、`storage_advice`、`risk_level`、`confidence` 和 `notes`。提示词明确要求忽略 YOLO 类别的语义暗示，并根据图片独立识别食物；新鲜度和储存建议可参考带时间戳的温湿度、探头和实际门状态，过期数据或估算探头值不能作为确定性结论。
 
 每轮自动识别完成后，管线会把当前 `active_objects`、本轮新增/未变/移除摘要、下次识别时间和最新传感器快照发送给 DeepSeek 云端模型，要求返回 JSON：`summary`、`risk_level`、`action_items`、`item_suggestions`、`next_check`。结果写入 `~/smart-fridge/data/pipeline_state.json` 的 `cloud_advice` 字段，并由 Web 面板展示。DeepSeek API key 默认从远端 Pi agent 的 `~/.pi/agent/auth.json` 读取，不写入项目仓库。
 
@@ -508,7 +519,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 自动管线语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_pipeline.py`
 - 环境采集与 Web 语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_sensor.py smart_fridge_runtime/fridge_web.py`
 - 维护脚本语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_maintenance.py`
-- 环境数据集成单元测试：`python3 -m unittest discover -s tests -v`，必须覆盖门状态双向取反、数据时效、VLM/DeepSeek 请求载荷和 Web API 字段。
+- 单元测试：`python3 -m unittest discover -s tests -v`，必须覆盖门状态双向取反、数据时效、VLM/DeepSeek 请求载荷、Web API 字段、低阈值变化候选、类别无关匹配、视觉内容变化和背景候选抑制。
 - 本地 SQLite 冒烟：使用临时目录执行 `fridge_db.py init/ingest/list-foods/show-food/health`，完成后删除临时库。
 - 本地管线差分冒烟：使用假 YOLO 与 mock VLM 执行三轮 `added -> unchanged -> removed`，并检查 24 张临时图保留。
 - 本地训练配置检查：`cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env && scripts/setup_yolo_training_local.sh`
@@ -524,7 +535,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 远程自启动检查：`ssh firecar-pi 'systemctl --user is-active smart-fridge-vlm.service smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer'`，五项应均为 `active`。
 - 远程传感器检查：`ssh firecar-pi '~/smart-fridge/bin/fridge_sensor.sh --check'`，应返回 `fresh=true`，且当前设备上报 `closed/false` 时纠正字段为 `door_state=open`、`door_open=true`。
 - ESP32-S3 烧录脚本检查：`bash -n scripts/flash_esp32s3_via_rk3399.sh scripts/rk3399_flash_esp32s3.sh`；正式烧录必须依次通过本机构建、bundle SHA-256、ESP32-S3/8 MB 探测、烧录前全闪存备份、写入校验、传感器 v2 连续帧和服务恢复。
-- 远程管线检查：真实 `/dev/video10` 摄像头已通过 `ffmpeg -f v4l2` 拍出 640x360 JPEG；真实摄像头当前 YOLO 检测为 0；公开数据集样图远程 mock VLM 验证通过 `added=11 -> unchanged=11 -> removed=11`。
+- 远程管线检查：真实 `/dev/video10` 摄像头应通过 `ffmpeg -f v4l2` 拍出 640x360 JPEG；YOLO 输出只计为变化候选，食物名称必须来自 VLM；同图连续执行时应保持原 `food_id` 且不增加 SQLite observation，已拒绝背景在视觉指纹未变化时不得重复调用 VLM。
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
@@ -555,6 +566,15 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 本仓库源代码采用 [MIT License](LICENSE)。数据集、基础模型、微调模型和第三方依赖不属于该许可证授权范围，使用时需分别遵守其原始许可证和服务条款。
 
 ## 修改历史
+
+- `main.0.15.0.202607231356`
+  - 将 YOLO 明确调整为低阈值变化候选和区域定位层，类别与置信度不再作为食物身份结论；VLM 独立负责是否为食物、具体名称和可见状态。
+  - 新增类别无关 IoU 与 64 位视觉指纹匹配，同框内容明显变化时重新触发 VLM，光照小幅变化或 YOLO 类别抖动时保留原 `food_id`。
+  - `pipeline_state.json` 新增 `rejected_candidates`，VLM 已拒绝且画面未变的背景候选会被抑制，避免每小时重复执行慢速推理。
+  - VLM 失败时默认不写库并在下一轮重试；显式容错记录只允许使用 `unknown_food`，不会采用 YOLO 类别或置信度作为识别结论。
+  - 新增 `SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE=0.45` 与 `SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE=16`，并补充 7 项变化路由单元测试。
+  - 本地 Python/Shell 检查与 13 项单元测试通过；远端运行时 SHA-256 与本机一致，VLM、传感器、Web 和自动管线服务均为 `active`。
+  - RK3399 隔离实测使用真实小白菜照片连续执行两轮：第一轮 `added=1`，第二轮 `unchanged=1`、视觉指纹距离为 `0`，临时 SQLite 始终保持 `foods=1`、`food_observations=1`、`food_events=1`，未重复入库。
 
 - `codex-vlm-inference-framework.0.14.0.202607222022`
   - 为 GitHub 公开发布补充 MIT 许可证、公开模型链接和通用部署地址，移除个人电脑路径、固定局域网地址与 USB 设备序列号。
