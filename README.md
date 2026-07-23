@@ -302,16 +302,19 @@ SMART_FRIDGE_SENSOR_READ_TIMEOUT_SECONDS=10
 
 ```text
 摄像头拍照 -> 保留最近 24 张临时图 -> YOLO 生成低阈值变化候选框
+  -> YOLO 零候选时复查上一轮对象区域；无历史对象时使用整帧候选
   -> 用类别无关 IoU + 视觉指纹与上一轮状态匹配
   -> unchanged 维持原 food_id，不重复调用 VLM
   -> suppressed 跳过此前已被 VLM 判定为非食物且画面未变的背景候选
   -> added 裁剪真正新增/变化的框，与最新环境快照一起发送给 llama.cpp VLM
   -> VLM 独立判断是否为食物、具体名称和可见状态；确认是食物后写 SQLite
-  -> removed 写入 food.removed 事件，并从当前 active state 移除
+  -> 无法确认消失时进入 pending_removals，连续两轮缺失后才写入 food.removed
   -> 本轮结束后将 active objects、变化摘要和最新环境快照发送给 DeepSeek
 ```
 
-YOLO 在该链路中只承担变化定位和候选区域生成，其类别与置信度仅作为调试和路由元数据，不作为最终食物名称。VLM 是食物身份和可见状态的语义判断来源。为兼顾召回率与 RK3399 的慢速 VLM，管线以较低阈值接收候选，再用 64 位视觉指纹抑制未变化对象和重复背景；同一位置的像素内容发生明显变化时会重新进入 VLM。
+YOLO 在该链路中只承担变化定位和候选区域生成，其类别与置信度仅作为调试和路由元数据，不作为最终食物名称。VLM 是食物身份和可见状态的语义判断来源。为兼顾召回率与 RK3399 的慢速 VLM，管线以较低阈值接收候选，再用 64 位视觉指纹抑制未变化对象和重复背景；同一位置的像素内容发生明显变化时会重新进入 VLM。若 YOLO 完全漏检，管线会在上一轮对象位置重新计算视觉指纹，避免把单次零候选直接解释为空冰箱；只有明确识别出替代对象，或同一对象连续缺失达到确认次数后，才关闭旧库存记录。
+
+单轮入口使用 Python `fcntl.flock` 非阻塞独占锁，手动触发和 systemd 定时轮次不能同时修改 `pipeline_state.json` 与 SQLite；锁已占用时后启动的轮次返回 `cycle_already_running` 并跳过。锁行为依据 [Python `fcntl` 官方文档](https://docs.python.org/3/library/fcntl.html)。
 
 关键配置在远程 `~/smart-fridge/config/smart_fridge.env`：
 
@@ -322,6 +325,8 @@ SMART_FRIDGE_CAMERA_DEVICE=/dev/video10
 SMART_FRIDGE_YOLO_BIN=/home/pi/yolo-inference/bin/yolo_detect.sh
 SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE=0.45
 SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE=16
+SMART_FRIDGE_REMOVAL_CONFIRMATIONS=2
+SMART_FRIDGE_PIPELINE_LOCK_PATH=/home/pi/smart-fridge/run/fridge-pipeline.lock
 SMART_FRIDGE_WRITE_FALLBACK_ON_VLM_ERROR=0
 SMART_FRIDGE_VLM_URL=http://127.0.0.1:8080/v1/chat/completions
 SMART_FRIDGE_VLM_TIMEOUT=3600
@@ -520,7 +525,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 自动管线语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_pipeline.py`
 - 环境采集与 Web 语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_sensor.py smart_fridge_runtime/fridge_web.py`
 - 维护脚本语法检查：`python3 -m py_compile smart_fridge_runtime/fridge_maintenance.py`
-- 单元测试：`python3 -m unittest discover -s tests -v`，必须覆盖门状态双向取反、数据时效、VLM/DeepSeek 请求载荷、Web API 字段、低阈值变化候选、类别无关匹配、视觉内容变化、背景候选抑制和非法 VLM 结果拒绝。
+- 单元测试：`python3 -m unittest discover -s tests -v`，必须覆盖门状态双向取反、数据时效、VLM/DeepSeek 请求载荷、Web API 字段、低阈值变化候选、类别无关匹配、视觉内容变化、零候选复查、连续缺失确认、单实例锁、背景候选抑制和非法 VLM 结果拒绝。
 - 本地 SQLite 冒烟：使用临时目录执行 `fridge_db.py init/ingest/list-foods/show-food/health`，完成后删除临时库。
 - 本地管线差分冒烟：使用假 YOLO 与 mock VLM 执行三轮 `added -> unchanged -> removed`，并检查 24 张临时图保留。
 - 本地训练配置检查：`cp config/yolo_public_dataset.env.example config/yolo_public_dataset.env && scripts/setup_yolo_training_local.sh`
@@ -536,7 +541,7 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 - 远程自启动检查：`ssh firecar-pi 'systemctl --user is-active smart-fridge-vlm.service smart-fridge-sensor.service smart-fridge-web.service smart-fridge-pipeline.service smart-fridge-maintenance.timer'`，五项应均为 `active`。
 - 远程传感器检查：`ssh firecar-pi '~/smart-fridge/bin/fridge_sensor.sh --check'`，应返回 `fresh=true`，且当前设备上报 `closed/false` 时纠正字段为 `door_state=open`、`door_open=true`。
 - ESP32-S3 烧录脚本检查：`bash -n scripts/flash_esp32s3_via_rk3399.sh scripts/rk3399_flash_esp32s3.sh`；正式烧录必须依次通过本机构建、bundle SHA-256、ESP32-S3/8 MB 探测、烧录前全闪存备份、写入校验、传感器 v2 连续帧和服务恢复。
-- 远程管线检查：真实 `/dev/video10` 摄像头应通过 `ffmpeg -f v4l2` 拍出 640x360 JPEG；YOLO 输出只计为变化候选，食物名称必须来自 VLM；同图连续执行时应保持原 `food_id` 且不增加 SQLite observation，已拒绝背景在视觉指纹未变化时不得重复调用 VLM。
+- 远程管线检查：真实 `/dev/video10` 摄像头应通过 `ffmpeg -f v4l2` 拍出 640x360 JPEG；YOLO 输出只计为变化候选，食物名称必须来自 VLM；同图连续执行时应保持原 `food_id` 且不增加 SQLite observation；YOLO 零候选时必须复查上一轮区域，单次漏检不得写 `food.removed`；已拒绝背景在视觉指纹未变化时不得重复调用 VLM。
 - 模型配置后服务检查：`ssh firecar-pi '~/vlm-inference/bin/health_vlm.sh'`
 - 当前智能冰箱 Qwen2.5-VL GGUF 已通过远端 `/v1/models` health 检查，能力包含 `multimodal`；离线 `llama-mtmd-cli` 单图冒烟已完成模型加载、图片编码并输出部分 JSON，识别到 `黄瓜/蔬菜`，但 128 token 完整生成在 900 秒内未结束。
 - 图片推理测试必须在模型配置完成后进行，使用 OpenAI-compatible `/v1/chat/completions` 传入图片 URL 或 base64 图片。
@@ -567,6 +572,14 @@ YOLO_FRACTION=0.05 YOLO_EPOCHS=1 scripts/train_yolo11n_local.sh
 本仓库源代码采用 [MIT License](LICENSE)。数据集、基础模型、微调模型和第三方依赖不属于该许可证授权范围，使用时需分别遵守其原始许可证和服务条款。
 
 ## 修改历史
+
+- `main.0.15.2.202607232032`
+  - 为自动管线增加 `fcntl.flock` 非阻塞单实例锁，手动识别与 systemd 定时轮次不再并发写状态文件和 SQLite。
+  - YOLO 零候选时自动复查上一轮活动对象和已拒绝区域；没有历史区域时才使用整帧 VLM 候选。
+  - 新增两轮消失确认与同 `food_id` 重识别保护，单次 YOLO/VLM 漏检不再直接写 `food.removed`。
+  - 补充 4 项并发与零候选回归测试，本地共 20 项单元测试。
+  - NanoPC-T4 真实零候选复测使用 `previous_regions` 保留苹果，`removed=[]`、`pending_removals=[]`；真实锁冲突返回 `cycle_already_running`。
+  - 远端 SQLite、状态文件和 Web API 的活动 `food_id` 一致，VLM/传感器/Web/自动管线/维护定时器均为 `active`，维护告警为 0。
 
 - `main.0.15.1.202607231928`
   - 为 VLM 响应增加 llama-server JSON Schema，严格约束字段类型、类别及状态枚举。

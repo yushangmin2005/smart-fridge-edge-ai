@@ -3,6 +3,8 @@
 
 import argparse
 import base64
+import errno
+import fcntl
 import json
 import math
 import mimetypes
@@ -141,6 +143,38 @@ def write_text(path, text):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(str(text), encoding="utf-8")
+
+
+def acquire_pipeline_lock(root):
+    lock_path = Path(
+        env(
+            "SMART_FRIDGE_PIPELINE_LOCK_PATH",
+            str(Path(root) / "run" / "fridge-pipeline.lock"),
+        )
+    ).expanduser()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            return None, lock_path
+        raise
+    handle.seek(0)
+    handle.truncate()
+    handle.write("{0}\n".format(os.getpid()))
+    handle.flush()
+    return handle, lock_path
+
+
+def release_pipeline_lock(handle):
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def run_command(command, timeout=None, capture_output=True):
@@ -353,6 +387,51 @@ def add_change_fingerprints(image_path, detections):
                 item["change_fingerprint"] = image_difference_hash(image.crop(crop_box))
             enriched.append(item)
     return enriched
+
+
+def zero_yolo_probe_candidates(image_path, previous_objects, previous_rejections):
+    from PIL import Image
+
+    probes = []
+    seen_boxes = set()
+    sources = [
+        ("active_object", item) for item in (previous_objects or [])
+    ] + [
+        ("rejected_candidate", item) for item in (previous_rejections or [])
+    ]
+    for source_kind, source in sources:
+        box = source.get("box") or {}
+        try:
+            box_key = tuple(round(float(box[key]), 3) for key in ("x1", "y1", "x2", "y2"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if box_key in seen_boxes:
+            continue
+        seen_boxes.add(box_key)
+        probes.append(
+            {
+                "class_id": -1,
+                "class_name": "region_probe",
+                "confidence": float(source.get("confidence") or 0.0),
+                "box": dict(box),
+                "pipeline_source": source_kind,
+                "previous_yolo_label": source.get("yolo_label"),
+            }
+        )
+
+    if probes:
+        return add_change_fingerprints(image_path, probes), "previous_regions"
+
+    with Image.open(image_path) as source:
+        width, height = source.size
+    full_frame = {
+        "class_id": -1,
+        "class_name": "scene_change",
+        "confidence": 1.0,
+        "box": {"x1": 0, "y1": 0, "x2": width, "y2": height},
+        "pipeline_source": "full_frame_fallback",
+    }
+    return add_change_fingerprints(image_path, [full_frame]), "full_frame"
 
 
 def fingerprint_distance(left, right):
@@ -585,6 +664,8 @@ def compact_active_object(item):
         "confidence": item.get("confidence"),
         "first_seen_at": item.get("first_seen_at"),
         "last_seen_at": item.get("last_seen_at"),
+        "missing_cycles": item.get("missing_cycles", 0),
+        "pending_removal_since": item.get("pending_removal_since"),
         "food_name": vlm.get("food_name"),
         "category": vlm.get("category"),
         "composition": vlm.get("composition") or [],
@@ -614,6 +695,7 @@ def build_cloud_advice_user_payload(active_objects, cycle_summary, sensor_contex
         "added": cycle_summary.get("added") or [],
         "unchanged": cycle_summary.get("unchanged") or [],
         "removed": cycle_summary.get("removed") or [],
+        "pending_removals": cycle_summary.get("pending_removals") or [],
         "active_objects": [compact_active_object(item) for item in active_objects],
         "sensor_snapshot": sensor_context or load_sensor_context(),
     }
@@ -1079,14 +1161,26 @@ def run_once(args):
     deleted_captures = prune_files(Path(paths["capture"]).parent, ["*.jpg", "*.jpeg", "*.png"], keep)
     prune_files(paths["crop_dir"], ["*.jpg", "*.jpeg", "*.png"], keep * env_int("SMART_FRIDGE_MAX_CROPS_PER_IMAGE", 8))
 
-    yolo_payload, detections = run_yolo(image_path, str(paths["yolo_json"]))
-    detections = add_change_fingerprints(image_path, detections)
-    yolo_payload["detections"] = detections
-    write_json(paths["yolo_json"], yolo_payload)
-
     previous_state = read_json(state_path, {"active_objects": []}) or {"active_objects": []}
     previous_objects = previous_state.get("active_objects") or []
     previous_rejections = previous_state.get("rejected_candidates") or []
+
+    yolo_payload, detections = run_yolo(image_path, str(paths["yolo_json"]))
+    raw_yolo_candidate_count = len(detections)
+    detections = add_change_fingerprints(image_path, detections)
+    zero_yolo_route = None
+    if not detections:
+        detections, zero_yolo_route = zero_yolo_probe_candidates(
+            image_path,
+            previous_objects,
+            previous_rejections,
+        )
+    yolo_payload["detections"] = detections
+    yolo_payload["pipeline_raw_candidate_count"] = raw_yolo_candidate_count
+    yolo_payload["pipeline_routed_candidate_count"] = len(detections)
+    yolo_payload["pipeline_zero_yolo_route"] = zero_yolo_route
+    write_json(paths["yolo_json"], yolo_payload)
+
     match_iou = env_float("SMART_FRIDGE_MATCH_IOU", 0.35)
     max_hash_distance = env_int("SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE", 16)
     matches, added_indexes, removed_indexes = match_detections(
@@ -1131,6 +1225,9 @@ def run_once(args):
                 "fingerprint_distance": hash_distance,
             }
         )
+        previous.pop("missing_cycles", None)
+        previous.pop("pending_removal_since", None)
+        previous.pop("last_missing_at", None)
         current_objects.append(previous)
         unchanged.append(
             {
@@ -1247,14 +1344,55 @@ def run_once(args):
             }
         )
 
+    current_food_ids = {
+        item.get("food_id")
+        for item in current_objects
+        if item.get("food_id")
+    }
+    added_food_ids = {
+        item.get("food_id")
+        for item in added
+        if item.get("food_id")
+    }
+    removal_confirmations = max(
+        1,
+        env_int("SMART_FRIDGE_REMOVAL_CONFIRMATIONS", 2),
+    )
+    pending_removals = []
     for previous_index in removed_indexes:
         previous = previous_objects[previous_index]
+        food_id = previous.get("food_id")
+        if food_id and food_id in current_food_ids:
+            continue
+
+        missing_cycles = int(previous.get("missing_cycles") or 0) + 1
+        confirmed_single_replacement = (
+            len(previous_objects) == 1
+            and len(added_food_ids) == 1
+            and food_id not in added_food_ids
+        )
+        if not confirmed_single_replacement and missing_cycles < removal_confirmations:
+            pending = dict(previous)
+            pending["missing_cycles"] = missing_cycles
+            pending["pending_removal_since"] = previous.get("pending_removal_since") or now
+            pending["last_missing_at"] = now
+            current_objects.append(pending)
+            pending_removals.append(
+                {
+                    "food_id": food_id,
+                    "food_name": (previous.get("vlm") or {}).get("food_name"),
+                    "missing_cycles": missing_cycles,
+                    "required_confirmations": removal_confirmations,
+                }
+            )
+            continue
+
         try:
             result = mark_removed(previous, now)
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
-            errors.append({"stage": "remove", "food_id": previous.get("food_id"), "error": str(exc)})
-        removed.append({"food_id": previous.get("food_id"), "yolo_label": previous.get("yolo_label"), "db_result": result})
+            errors.append({"stage": "remove", "food_id": food_id, "error": str(exc)})
+        removed.append({"food_id": food_id, "yolo_label": previous.get("yolo_label"), "db_result": result})
 
     completed_at = datetime.now(timezone.utc).replace(microsecond=0)
     interval = env_int("SMART_FRIDGE_CAPTURE_INTERVAL_SECONDS", 3600)
@@ -1267,10 +1405,13 @@ def run_once(args):
         "image_ref": image_path,
         "yolo_json": str(paths["yolo_json"]),
         "detections": len(detections),
+        "raw_yolo_candidates": raw_yolo_candidate_count,
+        "zero_yolo_route": zero_yolo_route,
         "yolo_role": "change_candidates",
         "unchanged": unchanged,
         "added": added,
         "removed": removed,
+        "pending_removals": pending_removals,
         "suppressed_candidates": suppressed,
         "rejected_candidate_count": len(current_rejections),
         "active_count": len(current_objects),
@@ -1305,7 +1446,22 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    summary = run_once(args)
+    root = Path(env("SMART_FRIDGE_ROOT", str(Path(__file__).resolve().parents[1])))
+    lock_handle, lock_path = acquire_pipeline_lock(root)
+    if lock_handle is None:
+        print_json(
+            {
+                "ok": True,
+                "skipped": True,
+                "reason": "cycle_already_running",
+                "lock_path": str(lock_path),
+            }
+        )
+        return 0
+    try:
+        summary = run_once(args)
+    finally:
+        release_pipeline_lock(lock_handle)
     print_json(summary)
     return 0 if summary.get("ok") else 1
 

@@ -31,7 +31,39 @@ def detection(label, confidence, fingerprint=None):
     return item
 
 
+def save_checkerboard(path, inverted=False):
+    image = Image.new("RGB", (64, 64), "white")
+    draw = ImageDraw.Draw(image)
+    for row in range(8):
+        for column in range(8):
+            dark = (row + column + int(inverted)) % 2 == 0
+            if dark:
+                x1, y1 = column * 8, row * 8
+                draw.rectangle((x1, y1, x1 + 7, y1 + 7), fill="black")
+    image.save(path)
+
+
 class YoloChangeCandidateTests(unittest.TestCase):
+    def test_pipeline_lock_rejects_overlapping_cycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "SMART_FRIDGE_PIPELINE_LOCK_PATH": str(
+                    Path(temp_dir) / "run" / "pipeline.lock"
+                )
+            },
+            clear=False,
+        ):
+            first, lock_path = fridge_pipeline.acquire_pipeline_lock(temp_dir)
+            second, second_path = fridge_pipeline.acquire_pipeline_lock(temp_dir)
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
+            self.assertEqual(second_path, lock_path)
+            fridge_pipeline.release_pipeline_lock(first)
+            third, _ = fridge_pipeline.acquire_pipeline_lock(temp_dir)
+            self.assertIsNotNone(third)
+            fridge_pipeline.release_pipeline_lock(third)
+
     def test_change_threshold_routes_candidate_before_semantic_vlm(self):
         payload = {
             "detections": [
@@ -104,6 +136,186 @@ class YoloChangeCandidateTests(unittest.TestCase):
         self.assertEqual(matches, {})
         self.assertEqual(added, [0])
         self.assertEqual(removed, [0])
+
+    def test_zero_yolo_rechecks_previous_region_without_repeating_vlm(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "scene.jpg"
+            image = Image.new("RGB", (64, 64), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((4, 8, 58, 50), fill="red")
+            image.save(image_path)
+
+            food = fridge_pipeline.normalize_vlm_result(
+                {
+                    "is_food": True,
+                    "food_name": "苹果",
+                    "category": "fruit",
+                    "freshness": "normal",
+                    "risk_level": "normal",
+                }
+            )
+            environment = {
+                "SMART_FRIDGE_ROOT": str(root),
+                "SMART_FRIDGE_STATE_PATH": str(root / "data" / "pipeline_state.json"),
+                "SMART_FRIDGE_TMP_DIR": str(root / "tmp"),
+                "SMART_FRIDGE_YOLO_MOCK_JSON": json.dumps(
+                    {"detections": [detection("apple", 0.52)]}
+                ),
+                "SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE": "0.45",
+                "SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE": "16",
+                "SMART_FRIDGE_CLOUD_ADVICE_ENABLED": "0",
+            }
+            args = argparse.Namespace(once=True, image=str(image_path))
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                fridge_pipeline,
+                "call_vlm",
+                return_value=food,
+            ) as call_vlm, patch.object(
+                fridge_pipeline,
+                "ingest_added_detection",
+                return_value={"food_id": "food-1"},
+            ), patch.object(
+                fridge_pipeline,
+                "mark_removed",
+            ) as mark_removed:
+                first = fridge_pipeline.run_once(args)
+                os.environ["SMART_FRIDGE_YOLO_MOCK_JSON"] = json.dumps(
+                    {"detections": []}
+                )
+                second = fridge_pipeline.run_once(args)
+
+        self.assertEqual(call_vlm.call_count, 1)
+        self.assertEqual(first["added"][0]["food_name"], "苹果")
+        self.assertEqual(second["raw_yolo_candidates"], 0)
+        self.assertEqual(second["zero_yolo_route"], "previous_regions")
+        self.assertEqual(second["unchanged"][0]["food_id"], "food-1")
+        self.assertEqual(second["pending_removals"], [])
+        self.assertEqual(second["removed"], [])
+        self.assertEqual(second["active_count"], 1)
+        mark_removed.assert_not_called()
+
+    def test_unconfirmed_disappearance_requires_two_cycles(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_image = root / "food.jpg"
+            second_image = root / "empty.jpg"
+            save_checkerboard(first_image)
+            save_checkerboard(second_image, inverted=True)
+
+            food = fridge_pipeline.normalize_vlm_result(
+                {
+                    "is_food": True,
+                    "food_name": "苹果",
+                    "category": "fruit",
+                    "freshness": "normal",
+                    "risk_level": "normal",
+                }
+            )
+            non_food = fridge_pipeline.normalize_vlm_result(
+                {
+                    "is_food": False,
+                    "food_name": "unknown_food",
+                    "category": "unknown",
+                    "freshness": "unknown",
+                    "risk_level": "unknown",
+                }
+            )
+            environment = {
+                "SMART_FRIDGE_ROOT": str(root),
+                "SMART_FRIDGE_STATE_PATH": str(root / "data" / "pipeline_state.json"),
+                "SMART_FRIDGE_TMP_DIR": str(root / "tmp"),
+                "SMART_FRIDGE_YOLO_MOCK_JSON": json.dumps(
+                    {"detections": [detection("apple", 0.52)]}
+                ),
+                "SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE": "0.45",
+                "SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE": "16",
+                "SMART_FRIDGE_REMOVAL_CONFIRMATIONS": "2",
+                "SMART_FRIDGE_CLOUD_ADVICE_ENABLED": "0",
+            }
+            first_args = argparse.Namespace(once=True, image=str(first_image))
+            second_args = argparse.Namespace(once=True, image=str(second_image))
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                fridge_pipeline,
+                "call_vlm",
+                side_effect=[food, non_food],
+            ) as call_vlm, patch.object(
+                fridge_pipeline,
+                "ingest_added_detection",
+                return_value={"food_id": "food-1"},
+            ), patch.object(
+                fridge_pipeline,
+                "mark_removed",
+                return_value={"ok": True, "event_type": "food.removed"},
+            ) as mark_removed:
+                fridge_pipeline.run_once(first_args)
+                os.environ["SMART_FRIDGE_YOLO_MOCK_JSON"] = json.dumps(
+                    {"detections": []}
+                )
+                pending = fridge_pipeline.run_once(second_args)
+                confirmed = fridge_pipeline.run_once(second_args)
+
+        self.assertEqual(call_vlm.call_count, 2)
+        self.assertEqual(pending["removed"], [])
+        self.assertEqual(pending["pending_removals"][0]["missing_cycles"], 1)
+        self.assertEqual(pending["active_count"], 1)
+        self.assertEqual(confirmed["pending_removals"], [])
+        self.assertEqual(confirmed["removed"][0]["food_id"], "food-1")
+        self.assertEqual(confirmed["active_count"], 0)
+        mark_removed.assert_called_once()
+
+    def test_reidentified_food_id_is_not_removed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_image = root / "first.jpg"
+            second_image = root / "second.jpg"
+            save_checkerboard(first_image)
+            save_checkerboard(second_image, inverted=True)
+
+            food = fridge_pipeline.normalize_vlm_result(
+                {
+                    "is_food": True,
+                    "food_name": "苹果",
+                    "category": "fruit",
+                    "freshness": "normal",
+                    "risk_level": "normal",
+                }
+            )
+            environment = {
+                "SMART_FRIDGE_ROOT": str(root),
+                "SMART_FRIDGE_STATE_PATH": str(root / "data" / "pipeline_state.json"),
+                "SMART_FRIDGE_TMP_DIR": str(root / "tmp"),
+                "SMART_FRIDGE_YOLO_MOCK_JSON": json.dumps(
+                    {"detections": [detection("apple", 0.52)]}
+                ),
+                "SMART_FRIDGE_YOLO_CHANGE_MIN_CONFIDENCE": "0.45",
+                "SMART_FRIDGE_CHANGE_HASH_MAX_DISTANCE": "16",
+                "SMART_FRIDGE_CLOUD_ADVICE_ENABLED": "0",
+            }
+            first_args = argparse.Namespace(once=True, image=str(first_image))
+            second_args = argparse.Namespace(once=True, image=str(second_image))
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                fridge_pipeline,
+                "call_vlm",
+                return_value=food,
+            ), patch.object(
+                fridge_pipeline,
+                "ingest_added_detection",
+                return_value={"food_id": "food-1"},
+            ), patch.object(
+                fridge_pipeline,
+                "mark_removed",
+            ) as mark_removed:
+                fridge_pipeline.run_once(first_args)
+                os.environ["SMART_FRIDGE_YOLO_MOCK_JSON"] = json.dumps(
+                    {"detections": []}
+                )
+                second = fridge_pipeline.run_once(second_args)
+
+        self.assertEqual(second["added"][0]["food_id"], "food-1")
+        self.assertEqual(second["removed"], [])
+        self.assertEqual(second["active_count"], 1)
+        mark_removed.assert_not_called()
 
     def test_rejected_background_is_not_sent_to_vlm_twice(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -117,7 +117,9 @@ food_events
 - 板端继续保持 YOLO ONNX Runtime CPU 推理，用于变化候选和区域生成。
 - VLM 继续保持 `llama.cpp` CPU runtime，当前使用智能冰箱 Qwen2.5-VL GGUF 模型。
 - SQLite 主库已落地到 `~/smart-fridge/data/fridge.sqlite3`，通过 `fridge_db.py` 维护 `foods`、`food_observations` 和 `food_events`。
-- 自动识别管线已落地到 `fridge_pipeline.py`：默认每 1 小时拍照一次，最多保留 24 张临时拍照图，YOLO 候选使用类别无关 IoU 与 64 位视觉指纹匹配，新增或变化区域裁剪后送入 VLM，移除目标写入 `food.removed` 事件。
+- 自动识别管线已落地到 `fridge_pipeline.py`：默认每 1 小时拍照一次，最多保留 24 张临时拍照图，YOLO 候选使用类别无关 IoU 与 64 位视觉指纹匹配，新增或变化区域裁剪后送入 VLM。
+- YOLO 为零候选时复查上一轮对象区域；单次无法确认消失只标记为待确认，连续两轮缺失后才写入 `food.removed`。
+- 手动轮次和 systemd 自动轮次共享非阻塞文件锁，任意时刻只允许一个管线进程更新状态与数据库。
 - VLM 超时或失败时默认不写入食物数据库，候选在下一轮重新分析；VLM 判定为非食物的未变化背景会被抑制。
 - OpenCL runtime 只作为实验结果保留，不参与默认链路。
 - 中文 Web 面板已展示当前库存、环境、变化记录和综合建议。
