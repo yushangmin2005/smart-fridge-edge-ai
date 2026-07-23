@@ -449,6 +449,43 @@ class YoloChangeCandidateTests(unittest.TestCase):
                 }
             )
 
+    def test_non_food_result_cannot_claim_meat_fields(self):
+        with self.assertRaisesRegex(ValueError, "contradictory food fields"):
+            fridge_pipeline.normalize_vlm_result(
+                {
+                    "is_food": False,
+                    "food_name": "unknown_food",
+                    "category": "meat",
+                    "composition": ["meat"],
+                    "freshness": "unknown",
+                    "risk_level": "danger",
+                    "visible_state": "bacon slices",
+                }
+            )
+
+    def test_complete_food_identity_corrects_false_is_food_flag(self):
+        result = fridge_pipeline.normalize_vlm_result(
+            {
+                "is_food": False,
+                "food_name": "肉片",
+                "category": "meat",
+                "composition": ["畜肉"],
+                "freshness": "unknown",
+                "freshness_score": 0.3,
+                "visible_state": "pinkish flesh",
+                "storage_advice": "refrigerator or freezer",
+                "risk_level": "danger",
+                "confidence": 0.4,
+                "notes": "unclear texture, possibly spoiled",
+            }
+        )
+
+        self.assertTrue(result["is_food"])
+        self.assertTrue(result["is_food_corrected"])
+        self.assertEqual(result["food_name"], "肉片")
+        self.assertEqual(result["category"], "meat")
+        self.assertEqual(result["composition"], ["畜肉"])
+
     def test_vlm_response_schema_constrains_semantic_fields(self):
         schema = fridge_pipeline.VLM_RESPONSE_SCHEMA
 

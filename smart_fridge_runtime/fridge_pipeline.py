@@ -41,6 +41,9 @@ VLM_CATEGORY_VALUES = (
     "unknown",
 )
 VLM_STATE_VALUES = ("normal", "attention", "danger", "unknown")
+VLM_UNKNOWN_FOOD_NAMES = frozenset(
+    ("", "unknown", "unknown_food", "none", "null", "未知", "非食物")
+)
 VLM_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -825,10 +828,6 @@ def normalize_vlm_result(payload):
     if not isinstance(result["food_name"], str):
         raise ValueError("VLM field food_name must be a string")
     result["food_name"] = result["food_name"].strip()
-    if not result["is_food"]:
-        result["food_name"] = "unknown_food"
-    elif not result["food_name"] or result["food_name"] == "unknown_food":
-        raise ValueError("VLM food result must contain an identified food_name")
     if any(character in result["food_name"] for character in ("|", "\r", "\n")):
         raise ValueError("VLM food_name contains an invalid option separator")
     for field, allowed in (
@@ -848,6 +847,9 @@ def normalize_vlm_result(payload):
         result["composition"] = [str(result["composition"])]
     if not all(isinstance(item, str) for item in result["composition"]):
         raise ValueError("VLM field composition must contain only strings")
+    result["composition"] = [
+        item.strip() for item in result["composition"] if item.strip()
+    ]
     for field in ("visible_state", "storage_advice", "notes"):
         if not isinstance(result[field], str):
             raise ValueError("VLM field {0} must be a string".format(field))
@@ -856,6 +858,35 @@ def normalize_vlm_result(payload):
             result[key] = max(0.0, min(1.0, float(result[key])))
         except (TypeError, ValueError):
             result[key] = 0.0
+
+    food_name_is_specific = (
+        result["food_name"].casefold() not in VLM_UNKNOWN_FOOD_NAMES
+    )
+    composition_is_specific = any(
+        item.casefold() not in VLM_UNKNOWN_FOOD_NAMES
+        for item in result["composition"]
+    )
+    if not result["is_food"]:
+        has_complete_food_identity = (
+            food_name_is_specific
+            and result["category"] != "unknown"
+            and composition_is_specific
+        )
+        has_contradictory_food_fields = (
+            result["category"] != "unknown"
+            or result["freshness"] != "unknown"
+            or result["risk_level"] != "unknown"
+            or composition_is_specific
+        )
+        if has_complete_food_identity:
+            result["is_food"] = True
+            result["is_food_corrected"] = True
+        elif has_contradictory_food_fields:
+            raise ValueError("VLM non-food result contains contradictory food fields")
+        else:
+            result["food_name"] = "unknown_food"
+    elif not food_name_is_specific:
+        raise ValueError("VLM food result must contain an identified food_name")
     return result
 
 
