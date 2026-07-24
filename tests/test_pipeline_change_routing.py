@@ -374,6 +374,20 @@ class YoloChangeCandidateTests(unittest.TestCase):
         self.assertIn("not food identity evidence", text)
         self.assertIn("identify it independently from the pixels", text)
 
+    def test_vlm_prompt_treats_bottled_water_as_drink_inventory(self):
+        prompt = (RUNTIME_DIR / "vlm_food_prompt.txt").read_text(encoding="utf-8")
+
+        self.assertIn("bottled water", prompt.lower())
+        self.assertIn("category=drink", prompt)
+        self.assertIn('"瓶装饮用水"', prompt)
+
+    def test_vlm_prompt_distinguishes_lemon_from_leafy_vegetables(self):
+        prompt = (RUNTIME_DIR / "vlm_food_prompt.txt").read_text(encoding="utf-8")
+
+        self.assertIn('food_name="柠檬"', prompt)
+        self.assertIn("category=fruit", prompt)
+        self.assertIn("leafy vegetable", prompt.lower())
+
     def test_vlm_error_does_not_ingest_yolo_identity(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
